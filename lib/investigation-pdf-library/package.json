@@ -1,0 +1,33 @@
+{
+  "name": "investigation-pdf-library",
+  "version": "2.0.0",
+  "description": "Advanced PDF generation library for investigation reports with data correlation, entity mapping, and pattern detection",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "jest",
+    "example": "ts-node examples/basic-usage.ts"
+  },
+  "dependencies": {
+    "pdf-lib": "^1.17.1",
+    "fontkit": "^2.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "ts-node": "^10.9.0"
+  },
+  "keywords": [
+    "pdf",
+    "investigation",
+    "correlation",
+    "entity-mapping",
+    "pattern-detection",
+    "report-generation",
+    "data-analysis",
+    "forensics"
+  ],
+  "author": "Investigation Tools",
+  "license": "MIT"
+}

@@ -1,0 +1,36 @@
+# Z-AI Configuration File
+# Copy this file to .z-ai-config (without .example) and fill in your values
+# The SDK will look for this file in: project directory, home directory, or /etc
+
+# ===========================================
+# API KEY (Required for cloud AI)
+# ===========================================
+# Get your API key from the AI service provider
+# API_KEY=your-api-key-here
+
+# ===========================================
+# BASE URL (Optional - for custom endpoints)
+# ===========================================
+# Use this to point to a different API endpoint
+# BASE_URL=https://api.openai.com/v1
+
+# ===========================================
+# MODEL SETTINGS (Optional)
+# ===========================================
+# Default model to use for completions
+# DEFAULT_MODEL=gpt-4
+
+# Temperature for responses (0.0 - 2.0)
+# TEMPERATURE=0.7
+
+# Max tokens for responses
+# MAX_TOKENS=4096
+
+# ===========================================
+# LOCAL AI SUPPORT
+# ===========================================
+# For local models (Ollama, LM Studio, vLLM), 
+# use environment variables instead:
+# USE_LOCAL_AI=true
+# LOCAL_AI_URL=http://localhost:11434/v1
+# LOCAL_AI_MODEL=llama3.1:8b
