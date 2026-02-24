@@ -1,75 +1,188 @@
 'use client';
 
-import React, { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Badge } from '@/components/ui/badge';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Progress } from '@/components/ui/progress';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { 
+  Search, 
+  Network, 
+  Database, 
+  RefreshCw,
+  AlertCircle,
+  ChevronDown,
+  ChevronUp,
+  Target,
+  Clock,
+  CheckCircle2,
+  XCircle,
+  Filter,
+  Download,
+  Zap,
+  Users,
+  GitBranch,
+  Activity,
+  Layers,
+  Sparkles,
+  FileText,
+} from 'lucide-react';
+import { useSettingsStore } from '@/store/settings';
+import type { RobustSearchResponse, FilteredResult } from '@/lib/robust-agent-search';
 import { CorrelationGraphView } from './correlation-graph-view';
-import type { RobustSearchResponse } from '@/lib/robust-agent-search';
 
-interface RobustSearchViewProps {
-  apiBaseUrl?: string;
-  bearerToken?: string;
+interface ProgressUpdate {
+  stage: string;
+  message: string;
+  progress: number;
+  currentPage: number;
+  totalResults: number;
+  hasMore: boolean;
+  iteration?: number;
+  discoveredEntities?: string[];
 }
 
-export function RobustSearchView({ apiBaseUrl, bearerToken }: RobustSearchViewProps) {
-  const [query, setQuery] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [progress, setProgress] = useState<{
-    stage: string;
-    message: string;
-    progress: number;
-  } | null>(null);
-  const [result, setResult] = useState<RobustSearchResponse | null>(null);
+export function RobustSearchView() {
+  const { baseUrl, bearerToken } = useSettingsStore();
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isSearching, setIsSearching] = useState(false);
+  const [progress, setProgress] = useState<ProgressUpdate | null>(null);
+  const [results, setResults] = useState<RobustSearchResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'results' | 'graph' | 'all'>('results');
+  const [expandedRecords, setExpandedRecords] = useState<Set<string>>(new Set());
   const [selectedTable, setSelectedTable] = useState<string>('all');
+  const abortControllerRef = useRef<AbortController | null>(null);
 
-  // Execute search
-  const handleSearch = useCallback(async () => {
-    if (!query.trim()) return;
+  const runSearch = useCallback(async () => {
+    if (!searchQuery.trim()) return;
 
-    setLoading(true);
+    setIsSearching(true);
     setError(null);
-    setResult(null);
-    setProgress({ stage: 'starting', message: 'Initializing search...', progress: 0 });
+    setResults(null);
+    setProgress({
+      stage: 'parsing',
+      message: 'Analyzing query...',
+      progress: 5,
+      currentPage: 0,
+      totalResults: 0,
+      hasMore: true,
+    });
+
+    abortControllerRef.current = new AbortController();
+
+    // Simulate progress updates during search
+    const progressInterval = setInterval(() => {
+      setProgress(prev => {
+        if (!prev) return null;
+        
+        // Cycle through stages
+        const stages = ['parsing', 'searching', 'paginating', 'iterating', 'filtering', 'analyzing'];
+        const currentIndex = stages.indexOf(prev.stage);
+        const nextIndex = Math.min(currentIndex + 1, stages.length - 1);
+        
+        // Increase progress gradually
+        const progressIncrement = Math.random() * 5 + 2;
+        const newProgress = Math.min(prev.progress + progressIncrement, 90);
+        
+        return {
+          stage: newProgress > 85 ? 'analyzing' : stages[nextIndex],
+          message: newProgress > 85 
+            ? 'Generating insights and building correlation graph...'
+            : prev.progress > 60 
+              ? `Processing ${prev.totalResults.toLocaleString()} results...`
+              : prev.progress > 30
+                ? `Fetching page ${prev.currentPage + 1}...`
+                : 'Searching...',
+          progress: newProgress,
+          currentPage: prev.currentPage + (Math.random() > 0.7 ? 1 : 0),
+          totalResults: prev.totalResults + Math.floor(Math.random() * 50),
+          hasMore: true,
+        };
+      });
+    }, 300);
 
     try {
       const response = await fetch('/api/robust-search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          query: query.trim(),
-          apiBaseUrl,
-          bearerToken,
+          query: searchQuery,
+          apiBaseUrl: baseUrl,
+          bearerToken: bearerToken || undefined,
         }),
+        signal: abortControllerRef.current.signal,
       });
 
+      clearInterval(progressInterval);
       const data = await response.json();
 
-      if (!data.success) {
-        throw new Error(data.error || 'Search failed');
+      if (data.success) {
+        setProgress({
+          stage: 'complete',
+          message: 'Search complete!',
+          progress: 100,
+          currentPage: data.metadata.apiCalls,
+          totalResults: data.totalFetched,
+          hasMore: false,
+        });
+        setResults(data);
+      } else {
+        setError(data.error || 'Search failed');
       }
-
-      setResult(data);
-      setProgress(null);
-
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Search failed');
-      setProgress(null);
+      clearInterval(progressInterval);
+      if (err instanceof Error && err.name === 'AbortError') {
+        setError('Search cancelled');
+      } else {
+        setError(err instanceof Error ? err.message : 'Search failed');
+      }
     } finally {
-      setLoading(false);
+      setIsSearching(false);
+      abortControllerRef.current = null;
     }
-  }, [query, apiBaseUrl, bearerToken]);
+  }, [searchQuery, baseUrl, bearerToken]);
+
+  const cancelSearch = useCallback(() => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+  }, []);
+
+  const toggleRecord = (id: string) => {
+    setExpandedRecords(prev => {
+      const newSet = new Set(prev);
+      newSet.has(id) ? newSet.delete(id) : newSet.add(id);
+      return newSet;
+    });
+  };
+
+  // Get unique tables
+  const tables = results?.filteredResults 
+    ? [...new Set(results.filteredResults.map(r => r.table))]
+    : [];
+
+  // Filter results by table
+  const displayResults = results?.filteredResults
+    ? selectedTable === 'all' 
+      ? results.filteredResults 
+      : results.filteredResults.filter(r => r.table === selectedTable)
+    : [];
 
   // Export to CSV
   const handleExportCSV = useCallback(async () => {
-    if (!result) return;
+    if (!results) return;
 
     try {
       const response = await fetch('/api/export/csv', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          results: result.filteredResults,
-          query: result.query.originalQuery,
+          results: results.filteredResults,
+          query: results.query.originalQuery,
         }),
       });
 
@@ -77,408 +190,493 @@ export function RobustSearchView({ apiBaseUrl, bearerToken }: RobustSearchViewPr
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `search_results_${Date.now()}.csv`;
+      a.download = `investigation_${Date.now()}.csv`;
       a.click();
       window.URL.revokeObjectURL(url);
-
     } catch (err) {
       console.error('Export failed:', err);
     }
-  }, [result]);
+  }, [results]);
 
-  // Get unique tables
-  const tables = React.useMemo(() => {
-    if (!result) return [];
-    const tableSet = new Set<string>();
-    result.filteredResults.forEach(r => tableSet.add(r.table));
-    return Array.from(tableSet);
-  }, [result]);
+  // Export to PDF
+  const [isExportingPDF, setIsExportingPDF] = useState(false);
+  
+  const handleExportPDF = useCallback(async () => {
+    if (!results) return;
+    
+    setIsExportingPDF(true);
+    try {
+      const response = await fetch('/api/export/pdf', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: results.query.originalQuery,
+          results: results.filteredResults,
+          graph: results.correlationGraph,
+          insights: results.insights,
+          metadata: results.metadata,
+        }),
+      });
 
-  // Filter results by table
-  const displayResults = React.useMemo(() => {
-    if (!result) return [];
-    if (selectedTable === 'all') return result.filteredResults;
-    return result.filteredResults.filter(r => r.table === selectedTable);
-  }, [result, selectedTable]);
+      if (!response.ok) {
+        throw new Error('Failed to generate PDF');
+      }
+
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `investigation_report_${Date.now()}.pdf`;
+      a.click();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('PDF export failed:', err);
+    } finally {
+      setIsExportingPDF(false);
+    }
+  }, [results]);
 
   return (
-    <div className="h-full flex flex-col bg-gray-50">
-      {/* Search Header */}
-      <div className="bg-white border-b border-gray-200 p-4">
-        <div className="max-w-4xl mx-auto">
-          <h1 className="text-2xl font-bold text-gray-900 mb-4">
-            🔍 Robust Agent Search
-          </h1>
-          
-          {/* Search Input */}
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-              placeholder="e.g., rahul sharma from delhi having no. 9876543210"
-              className="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-              disabled={loading}
-            />
-            <button
-              onClick={handleSearch}
-              disabled={loading || !query.trim()}
-              className="px-6 py-3 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {loading ? 'Searching...' : 'Search'}
-            </button>
+    <div className="flex flex-col h-full">
+      {/* Header */}
+      <div className="p-4 border-b bg-background">
+        <div className="flex items-center gap-3 mb-3">
+          <Network className="h-5 w-5 text-blue-500" />
+          <h2 className="text-lg font-semibold">Robust Agent Search</h2>
+          <Badge variant="secondary" className="text-xs">
+            <Layers className="h-3 w-3 mr-1" />
+            Iterative Discovery
+          </Badge>
+        </div>
+
+        <div className="flex gap-2">
+          <Input
+            placeholder="rahul sharma from delhi having no. 9876543210"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && runSearch()}
+            className="flex-1"
+            disabled={isSearching}
+          />
+          {isSearching ? (
+            <Button variant="destructive" onClick={cancelSearch}>
+              Cancel
+            </Button>
+          ) : (
+            <Button onClick={runSearch} disabled={!searchQuery.trim()}>
+              <Network className="mr-2 h-4 w-4" />Search
+            </Button>
+          )}
+        </div>
+
+        {/* Real-time Progress */}
+        {isSearching && progress && (
+          <div className="mt-3 space-y-2">
+            <div className="flex items-center justify-between text-sm">
+              <span className="flex items-center gap-2">
+                <RefreshCw className="h-4 w-4 animate-spin text-blue-500" />
+                {progress.message}
+              </span>
+              <span className="text-muted-foreground">{Math.round(progress.progress)}%</span>
+            </div>
+            <Progress value={progress.progress} className="h-2" />
+            <div className="flex gap-4 text-xs text-muted-foreground">
+              <span><Database className="inline h-3 w-3 mr-1" />{progress.totalResults} results</span>
+              <span><Layers className="inline h-3 w-3 mr-1" />Page {progress.currentPage}</span>
+              {progress.iteration && (
+                <span className="text-purple-500">
+                  <GitBranch className="inline h-3 w-3 mr-1" />Iteration {progress.iteration}
+                </span>
+              )}
+            </div>
+            {progress.discoveredEntities && progress.discoveredEntities.length > 0 && (
+              <div className="flex flex-wrap gap-1">
+                <span className="text-xs text-muted-foreground">Discovered:</span>
+                {progress.discoveredEntities.slice(0, 5).map((entity, i) => (
+                  <Badge key={i} variant="outline" className="text-[10px]">{entity}</Badge>
+                ))}
+              </div>
+            )}
           </div>
+        )}
 
-          {/* Progress Bar */}
-          {progress && (
-            <div className="mt-3">
-              <div className="flex justify-between text-sm text-gray-600 mb-1">
-                <span>{progress.message}</span>
-                <span>{Math.round(progress.progress)}%</span>
-              </div>
-              <div className="w-full bg-gray-200 rounded-full h-2">
-                <div
-                  className="bg-blue-600 h-2 rounded-full transition-all duration-300"
-                  style={{ width: `${progress.progress}%` }}
-                />
-              </div>
-            </div>
-          )}
-
-          {/* Error */}
-          {error && (
-            <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700">
-              {error}
-            </div>
-          )}
+        <div className="mt-2 text-xs text-muted-foreground">
+          Searches phone/email first, uses full pagination, discovers new identifiers iteratively
         </div>
       </div>
 
-      {/* Results Area */}
-      {result && (
-        <div className="flex-1 overflow-hidden">
-          <div className="h-full flex flex-col">
-            {/* Stats Bar */}
-            <div className="bg-white border-b border-gray-200 p-4">
-              <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4">
-                <div className="flex flex-wrap gap-6">
-                  <div>
-                    <span className="text-gray-500 text-sm">Search Term:</span>
-                    <span className="ml-2 font-mono font-medium text-blue-600">
-                      {result.metadata.primarySearchTerm}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-gray-500 text-sm">Fetched:</span>
-                    <span className="ml-2 font-medium">{result.totalFetched}</span>
-                  </div>
-                  <div>
-                    <span className="text-gray-500 text-sm">Filtered:</span>
-                    <span className="ml-2 font-medium text-green-600">{result.totalFiltered}</span>
-                  </div>
-                  <div>
-                    <span className="text-gray-500 text-sm">API Calls:</span>
-                    <span className="ml-2 font-medium">{result.metadata.apiCalls}</span>
-                  </div>
-                  <div>
-                    <span className="text-gray-500 text-sm">Duration:</span>
-                    <span className="ml-2 font-medium">
-                      {(result.metadata.duration / 1000).toFixed(2)}s
-                    </span>
-                  </div>
-                </div>
-
-                <button
-                  onClick={handleExportCSV}
-                  className="px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700"
-                >
-                  📥 Export CSV
-                </button>
-              </div>
-
-              {/* Filters Applied */}
-              {result.metadata.filtersApplied.length > 0 && (
-                <div className="mt-3">
-                  <span className="text-gray-500 text-sm">Filters Applied: </span>
-                  {result.metadata.filtersApplied.map((filter, i) => (
-                    <span
-                      key={i}
-                      className="inline-block px-2 py-0.5 bg-amber-100 text-amber-800 text-xs rounded-full mr-1"
-                    >
-                      {filter}
-                    </span>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* Tabs */}
-            <div className="bg-white border-b border-gray-200 px-4">
-              <div className="max-w-7xl mx-auto flex gap-1">
-                <button
-                  onClick={() => setActiveTab('results')}
-                  className={`px-4 py-2 text-sm font-medium rounded-t-lg ${
-                    activeTab === 'results'
-                      ? 'bg-blue-100 text-blue-700'
-                      : 'text-gray-600 hover:text-gray-900'
-                  }`}
-                >
-                  📋 Results ({result.totalFiltered})
-                </button>
-                <button
-                  onClick={() => setActiveTab('graph')}
-                  className={`px-4 py-2 text-sm font-medium rounded-t-lg ${
-                    activeTab === 'graph'
-                      ? 'bg-blue-100 text-blue-700'
-                      : 'text-gray-600 hover:text-gray-900'
-                  }`}
-                >
-                  🔗 Correlation Graph ({result.correlationGraph.nodes.length})
-                </button>
-                <button
-                  onClick={() => setActiveTab('all')}
-                  className={`px-4 py-2 text-sm font-medium rounded-t-lg ${
-                    activeTab === 'all'
-                      ? 'bg-blue-100 text-blue-700'
-                      : 'text-gray-600 hover:text-gray-900'
-                  }`}
-                >
-                  📊 All Data ({result.totalFetched})
-                </button>
-              </div>
-            </div>
-
-            {/* Tab Content */}
-            <div className="flex-1 overflow-y-auto p-4">
-              <div className="max-w-7xl mx-auto">
-                {/* Results Tab */}
-                {activeTab === 'results' && (
-                  <div className="space-y-4">
-                    {/* Table Filter */}
-                    {tables.length > 1 && (
-                      <div className="flex gap-2">
-                        <button
-                          onClick={() => setSelectedTable('all')}
-                          className={`px-3 py-1 rounded-lg text-sm font-medium ${
-                            selectedTable === 'all'
-                              ? 'bg-blue-600 text-white'
-                              : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                          }`}
-                        >
-                          All Tables
-                        </button>
-                        {tables.map(table => (
-                          <button
-                            key={table}
-                            onClick={() => setSelectedTable(table)}
-                            className={`px-3 py-1 rounded-lg text-sm font-medium ${
-                              selectedTable === table
-                                ? 'bg-blue-600 text-white'
-                                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                            }`}
-                          >
-                            {table}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-
-                    {/* Results List */}
-                    {displayResults.length === 0 ? (
-                      <div className="text-center py-12 text-gray-500">
-                        No results match the filter criteria
-                      </div>
-                    ) : (
-                      <div className="space-y-3">
-                        {displayResults.map((item, index) => (
-                          <div
-                            key={item.id}
-                            className="bg-white rounded-lg border border-gray-200 p-4 hover:shadow-md transition-shadow"
-                          >
-                            <div className="flex items-start justify-between">
-                              <div className="flex-1">
-                                <div className="flex items-center gap-2 mb-2">
-                                  <span className="text-xs text-gray-500">#{index + 1}</span>
-                                  <span className="px-2 py-0.5 bg-blue-100 text-blue-800 text-xs rounded-full">
-                                    {item.table}
-                                  </span>
-                                  <span className="px-2 py-0.5 bg-green-100 text-green-800 text-xs rounded-full">
-                                    Score: {Math.round(item.matchScore * 100)}%
-                                  </span>
-                                </div>
-                                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2 text-sm">
-                                  {Object.entries(item.record)
-                                    .slice(0, 8)
-                                    .map(([key, value]) => {
-                                      const isHighlighted = key in item.highlights;
-                                      return (
-                                        <div key={key}>
-                                          <span className="text-gray-500 text-xs">{key}:</span>
-                                          <div
-                                            className={`font-medium truncate ${
-                                              isHighlighted ? 'text-blue-600' : 'text-gray-900'
-                                            }`}
-                                            title={String(value)}
-                                            dangerouslySetInnerHTML={{
-                                              __html: isHighlighted
-                                                ? item.highlights[key].replace(/\*\*/g, '<mark class="bg-yellow-200">').replace(/\*\*/g, '</mark>')
-                                                : String(value),
-                                            }}
-                                          />
-                                        </div>
-                                      );
-                                    })}
-                                </div>
-                                {item.matchedFilters.length > 0 && (
-                                  <div className="mt-2 flex flex-wrap gap-1">
-                                    {item.matchedFilters.map((filter, i) => (
-                                      <span
-                                        key={i}
-                                        className="px-2 py-0.5 bg-amber-100 text-amber-800 text-xs rounded"
-                                      >
-                                        ✓ {filter}
-                                      </span>
-                                    ))}
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Graph Tab */}
-                {activeTab === 'graph' && (
-                  <CorrelationGraphView
-                    graph={result.correlationGraph}
-                    results={result.filteredResults}
-                  />
-                )}
-
-                {/* All Data Tab */}
-                {activeTab === 'all' && (
-                  <div className="space-y-4">
-                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-                      <h3 className="font-medium text-blue-900 mb-2">
-                        📊 All Fetched Data ({result.totalFetched} records)
-                      </h3>
-                      <p className="text-sm text-blue-700 mb-3">
-                        This shows all data fetched from the API across {result.metadata.apiCalls} pages.
-                        {result.metadata.cursorsUsed.length > 0 && (
-                          <> Pagination used {result.metadata.cursorsUsed.length} cursors.</>
-                        )}
-                      </p>
-                      <div className="text-sm text-blue-700">
-                        <strong>Insights:</strong> {result.insights.summary}
-                      </div>
-                    </div>
-
-                    {/* Patterns */}
-                    {result.insights.patterns.length > 0 && (
-                      <div className="bg-white rounded-lg border border-gray-200 p-4">
-                        <h4 className="font-medium text-gray-900 mb-2">🔍 Detected Patterns</h4>
-                        <ul className="space-y-1">
-                          {result.insights.patterns.map((pattern, i) => (
-                            <li key={i} className="text-sm text-gray-600 flex items-start">
-                              <span className="text-blue-500 mr-2">•</span>
-                              {pattern}
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-
-                    {/* Entity Connections */}
-                    {result.insights.entityConnections.length > 0 && (
-                      <div className="bg-white rounded-lg border border-gray-200 p-4">
-                        <h4 className="font-medium text-gray-900 mb-2">🔗 Top Entity Connections</h4>
-                        <div className="overflow-x-auto">
-                          <table className="w-full text-sm">
-                            <thead>
-                              <tr className="border-b border-gray-200">
-                                <th className="text-left p-2">Entity</th>
-                                <th className="text-left p-2">Type</th>
-                                <th className="text-right p-2">Appearances</th>
-                                <th className="text-left p-2">Tables</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {result.insights.entityConnections.slice(0, 20).map((conn, i) => (
-                                <tr key={i} className="border-b border-gray-100">
-                                  <td className="p-2 font-medium">{conn.entity}</td>
-                                  <td className="p-2">
-                                    <span className="px-2 py-0.5 bg-gray-100 text-gray-700 rounded text-xs">
-                                      {conn.type}
-                                    </span>
-                                  </td>
-                                  <td className="p-2 text-right">{conn.appearances}</td>
-                                  <td className="p-2 text-gray-500 text-xs">
-                                    {conn.tables.join(', ')}
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Recommendations */}
-                    {result.insights.recommendations.length > 0 && (
-                      <div className="bg-white rounded-lg border border-gray-200 p-4">
-                        <h4 className="font-medium text-gray-900 mb-2">💡 Recommendations</h4>
-                        <ul className="space-y-1">
-                          {result.insights.recommendations.map((rec, i) => (
-                            <li key={i} className="text-sm text-gray-600 flex items-start">
-                              <span className="text-green-500 mr-2">→</span>
-                              {rec}
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
+      {/* Error */}
+      {error && (
+        <div className="p-4">
+          <Alert variant="destructive">
+            <AlertCircle className="h-4 w-4" />
+            <AlertTitle>Error</AlertTitle>
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
         </div>
       )}
 
-      {/* Empty State */}
-      {!result && !loading && (
-        <div className="flex-1 flex items-center justify-center">
-          <div className="text-center max-w-md mx-auto p-8">
-            <div className="text-6xl mb-4">🔍</div>
-            <h2 className="text-xl font-medium text-gray-900 mb-2">
-              Robust Agent Search
-            </h2>
-            <p className="text-gray-600 mb-4">
-              Enter a search query to find all matching records. The agent will:
-            </p>
-            <ul className="text-left text-sm text-gray-600 space-y-2">
-              <li className="flex items-start">
-                <span className="text-blue-500 mr-2">1.</span>
-                Extract search criteria (phone, email, ID, name, location)
-              </li>
-              <li className="flex items-start">
-                <span className="text-blue-500 mr-2">2.</span>
-                Search the primary term with full pagination (all results)
-              </li>
-              <li className="flex items-start">
-                <span className="text-blue-500 mr-2">3.</span>
-                Filter results by secondary criteria
-              </li>
-              <li className="flex items-start">
-                <span className="text-blue-500 mr-2">4.</span>
-                Build correlation graphs and generate insights
-              </li>
-            </ul>
+      {/* Results */}
+      <ScrollArea className="flex-1 p-4">
+        {!results ? (
+          <Card>
+            <CardContent className="flex flex-col items-center justify-center py-16">
+              <Network className="h-16 w-16 text-muted-foreground mb-4" />
+              <h3 className="text-lg font-semibold mb-2">Robust Iterative Search</h3>
+              <p className="text-sm text-muted-foreground text-center max-w-md mb-4">
+                Comprehensive search with entity discovery and relationship mapping
+              </p>
+              <div className="space-y-2 text-sm max-w-md">
+                <div className="p-2 bg-green-50 dark:bg-green-950/20 rounded flex items-center gap-2">
+                  <span className="text-green-600 font-medium">1.</span>
+                  <span>Extract identifiers (phone, email, ID, name, location)</span>
+                </div>
+                <div className="p-2 bg-blue-50 dark:bg-blue-950/20 rounded flex items-center gap-2">
+                  <span className="text-blue-600 font-medium">2.</span>
+                  <span>Search with full pagination (all results)</span>
+                </div>
+                <div className="p-2 bg-purple-50 dark:bg-purple-950/20 rounded flex items-center gap-2">
+                  <span className="text-purple-600 font-medium">3.</span>
+                  <span>Discover new identifiers from results</span>
+                </div>
+                <div className="p-2 bg-orange-50 dark:bg-orange-950/20 rounded flex items-center gap-2">
+                  <span className="text-orange-600 font-medium">4.</span>
+                  <span>Build correlation graph & generate insights</span>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        ) : (
+          <div className="space-y-4">
+            {/* Summary Card */}
+            <Card className="bg-primary/5">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <Activity className="h-4 w-4 text-green-500" />
+                  Investigation Summary
+                  {results.query.aiEntityExtraction && (
+                    <Badge variant="default" className="ml-2 bg-purple-500 text-white">
+                      <Sparkles className="h-3 w-3 mr-1" />
+                      AI Enhanced
+                    </Badge>
+                  )}
+                  {results.insights.localAIUsed && (
+                    <Badge variant="outline" className="ml-1 text-purple-600 border-purple-300">
+                      AI Insights: {results.insights.aiModel}
+                    </Badge>
+                  )}
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm mb-3">{results.insights.summary}</p>
+                
+                {/* Stats Grid */}
+                <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-3">
+                  <div className="p-2 bg-background rounded border">
+                    <div className="text-xs text-muted-foreground">Total Fetched</div>
+                    <div className="text-lg font-bold">{results.totalFetched.toLocaleString()}</div>
+                  </div>
+                  <div className="p-2 bg-background rounded border">
+                    <div className="text-xs text-muted-foreground">Results</div>
+                    <div className="text-lg font-bold text-green-600">{results.totalFiltered.toLocaleString()}</div>
+                  </div>
+                  <div className="p-2 bg-background rounded border">
+                    <div className="text-xs text-muted-foreground">API Calls</div>
+                    <div className="text-lg font-bold">{results.metadata.apiCalls}</div>
+                  </div>
+                  <div className="p-2 bg-background rounded border">
+                    <div className="text-xs text-muted-foreground">Duration</div>
+                    <div className="text-lg font-bold">{(results.metadata.duration / 1000).toFixed(1)}s</div>
+                  </div>
+                  <div className="p-2 bg-background rounded border">
+                    <div className="text-xs text-muted-foreground">Iterations</div>
+                    <div className="text-lg font-bold text-purple-600">{results.metadata.iterations}</div>
+                  </div>
+                  <div className="p-2 bg-background rounded border">
+                    <div className="text-xs text-muted-foreground">Duplicates</div>
+                    <div className="text-lg font-bold text-orange-600">{results.duplicatesRemoved}</div>
+                  </div>
+                </div>
+
+                {/* Discovered Entities */}
+                {results.metadata.discoveredEntityList && results.metadata.discoveredEntityList.length > 0 && (
+                  <div className="mb-3">
+                    <div className="text-xs text-muted-foreground mb-1">
+                      Discovered Entities ({results.metadata.discoveredEntities}):
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                      {results.metadata.discoveredEntityList.slice(0, 10).map((entity, i) => (
+                        <Badge key={i} variant="outline" className="text-[10px]">{entity}</Badge>
+                      ))}
+                      {results.metadata.discoveredEntityList.length > 10 && (
+                        <Badge variant="secondary" className="text-[10px]">
+                          +{results.metadata.discoveredEntityList.length - 10} more
+                        </Badge>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Search Details */}
+                <div className="flex flex-wrap gap-2 text-xs">
+                  <Badge variant="default">
+                    <Search className="h-3 w-3 mr-1" />
+                    {results.metadata.primarySearchTerm}
+                  </Badge>
+                  {results.metadata.filtersApplied.map((f, i) => (
+                    <Badge key={i} variant="secondary">
+                      <Filter className="h-3 w-3 mr-1" />
+                      {f}
+                    </Badge>
+                  ))}
+                  {results.metadata.earlyStopped && (
+                    <Badge variant="destructive">Limit Reached</Badge>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Tabs for Results/Graph/Insights */}
+            <Tabs defaultValue="results" className="w-full">
+              <TabsList className="grid w-full grid-cols-3">
+                <TabsTrigger value="results">
+                  <Database className="h-4 w-4 mr-2" />
+                  Results ({results.totalFiltered})
+                </TabsTrigger>
+                <TabsTrigger value="graph">
+                  <GitBranch className="h-4 w-4 mr-2" />
+                  Correlations ({results.correlationGraph.nodes.length})
+                </TabsTrigger>
+                <TabsTrigger value="insights">
+                  <Zap className="h-4 w-4 mr-2" />
+                  Insights
+                </TabsTrigger>
+              </TabsList>
+
+              {/* Results Tab */}
+              <TabsContent value="results" className="space-y-3">
+                {/* Table Filter */}
+                {tables.length > 1 && (
+                  <div className="flex gap-2 flex-wrap">
+                    <Button
+                      variant={selectedTable === 'all' ? 'default' : 'outline'}
+                      size="sm"
+                      onClick={() => setSelectedTable('all')}
+                    >
+                      All Tables
+                    </Button>
+                    {tables.map(table => (
+                      <Button
+                        key={table}
+                        variant={selectedTable === table ? 'default' : 'outline'}
+                        size="sm"
+                        onClick={() => setSelectedTable(table)}
+                      >
+                        {table}
+                      </Button>
+                    ))}
+                  </div>
+                )}
+
+                {/* Export Buttons */}
+                <div className="flex justify-end gap-2">
+                  <Button variant="outline" size="sm" onClick={handleExportCSV}>
+                    <Download className="h-4 w-4 mr-2" />
+                    CSV
+                  </Button>
+                  <Button 
+                    variant="default" 
+                    size="sm" 
+                    onClick={handleExportPDF}
+                    disabled={isExportingPDF}
+                  >
+                    {isExportingPDF ? (
+                      <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                    ) : (
+                      <FileText className="h-4 w-4 mr-2" />
+                    )}
+                    Export PDF Report
+                  </Button>
+                </div>
+
+                {/* Results List */}
+                {displayResults.length === 0 ? (
+                  <div className="text-center py-8 text-muted-foreground">
+                    <XCircle className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                    <p>No results match the filter criteria</p>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {displayResults.slice(0, 50).map((result) => (
+                      <ResultCard 
+                        key={result.id} 
+                        result={result} 
+                        isExpanded={expandedRecords.has(result.id)}
+                        onToggle={() => toggleRecord(result.id)}
+                      />
+                    ))}
+                    {displayResults.length > 50 && (
+                      <p className="text-center text-sm text-muted-foreground py-2">
+                        Showing 50 of {displayResults.length} results
+                      </p>
+                    )}
+                  </div>
+                )}
+              </TabsContent>
+
+              {/* Graph Tab */}
+              <TabsContent value="graph">
+                <CorrelationGraphView 
+                  graph={results.correlationGraph}
+                  searchHistory={[results.metadata.primarySearchTerm, ...results.metadata.discoveredEntityList.slice(0, 5)]}
+                  discoveredEntities={results.metadata.discoveredEntityList}
+                />
+              </TabsContent>
+
+              {/* Insights Tab */}
+              <TabsContent value="insights" className="space-y-3">
+                {/* Entity Connections Table */}
+                <Card>
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-sm flex items-center gap-2">
+                      <Users className="h-4 w-4" />
+                      Entity Connections
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="space-y-1">
+                      {results.insights.entityConnections.slice(0, 15).map((conn, i) => (
+                        <div key={i} className="flex items-center justify-between p-2 hover:bg-muted/50 rounded text-sm">
+                          <div className="flex items-center gap-2">
+                            <Badge variant="outline" className="text-[10px]">{conn.type}</Badge>
+                            <span className="font-medium">{conn.entity}</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-muted-foreground">
+                              {conn.tables.join(', ').slice(0, 30)}
+                            </span>
+                            <Badge variant="secondary">{conn.appearances}</Badge>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
+
+                {/* Patterns */}
+                {results.insights.patterns.length > 0 && (
+                  <Card>
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-sm">Detected Patterns</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <ul className="space-y-1 text-sm">
+                        {results.insights.patterns.map((pattern, i) => (
+                          <li key={i} className="flex items-start gap-2">
+                            <CheckCircle2 className="h-4 w-4 text-green-500 mt-0.5 shrink-0" />
+                            <span>{pattern}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </CardContent>
+                  </Card>
+                )}
+
+                {/* Recommendations */}
+                {results.insights.recommendations.length > 0 && (
+                  <Card>
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-sm">Recommendations</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <ul className="space-y-1 text-sm">
+                        {results.insights.recommendations.map((rec, i) => (
+                          <li key={i} className="flex items-start gap-2">
+                            <Zap className="h-4 w-4 text-yellow-500 mt-0.5 shrink-0" />
+                            <span>{rec}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </CardContent>
+                  </Card>
+                )}
+
+                {/* Top Matches */}
+                <Card>
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-sm">Top Matches</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-2">
+                    {results.insights.topMatches.slice(0, 5).map((result) => (
+                      <div key={result.id} className="p-2 bg-muted/50 rounded text-sm">
+                        <div className="flex items-center gap-2 mb-1">
+                          <Badge variant="outline" className="text-[10px]">{result.table}</Badge>
+                          <Badge className="text-[10px] bg-green-500">
+                            {Math.round(result.matchScore * 100)}% match
+                          </Badge>
+                        </div>
+                        <div className="text-xs text-muted-foreground truncate">
+                          {Object.entries(result.record).slice(0, 3).map(([k, v]) => 
+                            `${k}: ${String(v).slice(0, 20)}`
+                          ).join(' • ')}
+                        </div>
+                      </div>
+                    ))}
+                  </CardContent>
+                </Card>
+              </TabsContent>
+            </Tabs>
           </div>
+        )}
+      </ScrollArea>
+    </div>
+  );
+}
+
+// Result Card Component
+function ResultCard({ 
+  result, 
+  isExpanded, 
+  onToggle, 
+}: { 
+  result: FilteredResult; 
+  isExpanded: boolean; 
+  onToggle: () => void;
+}) {
+  return (
+    <div className="border rounded-lg p-3 hover:bg-muted/30 transition-colors">
+      <div className="flex items-center justify-between cursor-pointer" onClick={onToggle}>
+        <div className="flex items-center gap-2">
+          <Badge variant="outline" className="text-xs">{result.table}</Badge>
+          <span className="text-sm font-medium truncate max-w-[200px]">
+            {Object.values(result.record).slice(0, 2).filter(v => v).join(' • ') || 'View Details'}
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          <Badge variant="secondary" className="text-xs">
+            {Math.round(result.matchScore * 100)}%
+          </Badge>
+          {isExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+        </div>
+      </div>
+
+      {isExpanded && (
+        <div className="mt-2 pt-2 border-t text-xs space-y-1">
+          {Object.entries(result.record).slice(0, 10).map(([key, value]) => (
+            <div key={key} className="flex justify-between">
+              <span className="text-muted-foreground">{key}:</span>
+              <span className={`truncate max-w-[250px] text-right ${key in result.highlights ? 'font-semibold text-primary' : ''}`}>
+                {value !== null && value !== undefined ? String(value).slice(0, 80) : '-'}
+              </span>
+            </div>
+          ))}
+          {result.matchedFilters.length > 0 && (
+            <div className="pt-2 flex flex-wrap gap-1">
+              {result.matchedFilters.map((f, i) => (
+                <Badge key={i} variant="secondary" className="text-[10px]">{f}</Badge>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>

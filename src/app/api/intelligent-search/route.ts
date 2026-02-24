@@ -87,7 +87,7 @@ export async function GET(request: NextRequest): Promise<NextResponse<SearchResp
     const searchEngine = createIntelligentSearch({
       apiBaseUrl: process.env.SEARCH_API_URL,
       useLocalAI: true,
-      aiModel: 'qwen2.5:3b',
+      aiModel: 'qwen3:4b',
     });
 
     // Execute search
