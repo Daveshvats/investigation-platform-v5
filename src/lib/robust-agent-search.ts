@@ -1,1364 +1,889 @@
 /**
- * Robust AI Agent Search Engine
- * 
- * 2026 Best Practices Implementation:
- * 
- * Uses new intelligent components:
- * - entity-extractor.ts: GLiNER-style zero-shot NER
- * - ollama-client.ts: Local AI for reasoning (Qwen, Llama, Gemma)
- * - embedding-service.ts: Semantic similarity for deduplication
- * 
- * KEY INSIGHT: Only HIGH-VALUE entities are searched!
- * - HIGH VALUE (search): phone, email, id_number, account
- * - LOW VALUE (filter only): name, location, company
- * 
- * Complete Workflow:
- * 1. User query: "rahul sharma from delhi having no. 9876543210"
- * 2. Entity Extractor finds:
- *    - Phone: 9876543210 (HIGH VALUE - SEARCH)
- *    - Name: "Rahul Sharma" (LOW VALUE - FILTER ONLY)
- *    - Location: "Delhi" (LOW VALUE - FILTER ONLY)
- * 3. Search API with only HIGH-VALUE term: /api/search?q=9876543210
- * 4. Paginate until has_more=false
- * 5. Extract NEW high-value identifiers from results
- * 6. Iterate: search newly discovered phones/emails
- * 7. Filter results using LOW-VALUE criteria
- * 8. Deduplicate using semantic similarity
- * 9. Build knowledge graph
- * 10. Generate AI insights
+ * Robust Agent Search Engine V2
+ * Integrates 2026-standard hybrid extraction, knowledge graph, and correlation
+ * Maintains backward compatibility with original API
  */
 
-import { createLogger } from './logger';
-import { entityExtractor, type ExtractedEntity } from './entity-extractor';
-import { ollamaClient } from './ollama-client';
-import { embeddingService, recordSimilarity } from './embedding-service';
-
-const logger = createLogger('RobustAgentSearch');
+import { 
+  EntityExtractor, 
+  ExtractedEntities, 
+  Entity, 
+  EntityRelationship 
+} from './entity-extractor';
+import { 
+  HybridEntityExtractor,
+  Entity as V2Entity,
+} from './v2/hybrid-entity-extractor';
+import { 
+  KnowledgeGraphBuilder,
+  RelationshipInferrer,
+} from './v2/knowledge-graph';
+import { 
+  CorrelationEngine,
+} from './v2/correlation-engine';
+import { 
+  SemanticQueryParser,
+} from './v2/semantic-query-parser';
 
 // ============================================================================
-// TYPES
+// TYPES AND INTERFACES (Backward Compatible)
 // ============================================================================
 
-export interface SearchCriterion {
+export interface SearchResult {
   id: string;
-  type: 'primary' | 'secondary' | 'tertiary'; // primary = search first, tertiary = search after primary, secondary = filter
-  category: 'phone' | 'name' | 'location' | 'email' | 'id_number' | 'account' | 'company' | 'address' | 'keyword';
-  value: string;
-  normalizedValue: string;
-  description: string;
-  confidence: number;
-  searchValue: 'HIGH' | 'MEDIUM' | 'LOW'; // Search priority
-  specificity?: number; // For addresses
-}
-
-export interface ParsedQuery {
-  originalQuery: string;
-  primaryCriteria: SearchCriterion[];  // HIGH-VALUE: Terms to search first
-  tertiaryCriteria: SearchCriterion[]; // MEDIUM-VALUE: Terms to search after primary (addresses)
-  secondaryCriteria: SearchCriterion[]; // LOW-VALUE: Terms to filter results only
-  intent: string;
-  aiEntityExtraction?: boolean;
-}
-
-export interface PaginatedResult {
-  table: string;
-  record: Record<string, unknown>;
-  pageNumber: number;
-  cursor: string | null;
-  entitySignature: string; // For deduplication
-}
-
-export interface FilteredResult {
-  id: string;
-  table: string;
-  record: Record<string, unknown>;
-  matchedFilters: string[];
-  matchScore: number;
-  highlights: Record<string, string>;
+  tableName: string;
+  data: Record<string, unknown>;
+  matchedFields: string[];
+  matchedEntities: Entity[];
+  score: number;
 }
 
 export interface CorrelationNode {
   id: string;
-  type: 'person' | 'phone' | 'location' | 'email' | 'company' | 'account' | 'id' | 'address' | 'other';
+  type: 'person' | 'phone' | 'email' | 'address' | 'account' | 'other';
+  label: string;
+  entityType: string;
   value: string;
-  count: number;
   connections: string[];
+  occurrences: number;
   sources: string[];
+  riskScore?: number;
+  cluster?: string;
 }
 
 export interface CorrelationEdge {
+  id: string;
   source: string;
   target: string;
+  relationship: string;
   weight: number;
-  type: string;
+  sources: string[];
+  strength?: string;
+  confidence?: number;
 }
 
 export interface CorrelationGraph {
   nodes: CorrelationNode[];
   edges: CorrelationEdge[];
-  clusters: Array<{
-    id: string;
-    nodes: string[];
-    label: string;
-  }>;
+  clusters: Map<string, string[]>;
 }
 
-export interface RobustSearchResponse {
-  success: boolean;
-  query: ParsedQuery;
-  
-  // All fetched results (before filtering)
-  allFetchedResults: PaginatedResult[];
-  totalFetched: number;
-  totalPages: number;
-  
-  // Filtered results
-  filteredResults: FilteredResult[];
-  totalFiltered: number;
-  duplicatesRemoved: number;
-  
-  // Analysis
-  correlationGraph: CorrelationGraph;
-  insights: {
-    summary: string;
-    topMatches: FilteredResult[];
-    entityConnections: Array<{
-      entity: string;
-      type: string;
-      appearances: number;
-      tables: string[];
-    }>;
-    patterns: string[];
-    recommendations: string[];
-    confidence: number;
-    aiModel: string;
-    localAIUsed: boolean;
-  };
-  
-  // Metadata
-  metadata: {
-    duration: number;
-    apiCalls: number;
-    cursorsUsed: string[];
-    primarySearchTerm: string;
-    filtersApplied: string[];
-    hasMoreData: boolean;
-    earlyStopped: boolean;
-    iterations: number;
-    discoveredEntities: number;
-    discoveredEntityList: string[];
-    highValueEntities: number;
-    lowValueEntities: number;
-  };
-}
-
-export interface ProgressUpdate {
-  stage: 'parsing' | 'searching' | 'paginating' | 'filtering' | 'analyzing' | 'iterating' | 'complete';
+export interface SearchProgress {
+  phase: 'extracting' | 'searching' | 'discovering' | 'building_graph' | 'analyzing' | 'filtering' | 'complete';
   message: string;
   progress: number;
-  currentPage: number;
-  totalResults: number;
-  hasMore: boolean;
-  iteration?: number;
-  discoveredEntities?: string[];
+  entitiesFound: number;
+  resultsFound: number;
+  currentEntity?: string;
+}
+
+export interface SearchOptions {
+  maxIterations?: number;
+  maxResultsPerEntity?: number;
+  minConfidence?: number;
+  includeGraph?: boolean;
+  enableV2?: boolean;
+  analyzeCorrelations?: boolean;
+  timeout?: number;
+  onProgress?: (progress: SearchProgress) => void;
+}
+
+export interface SearchResponse {
+  success: boolean;
+  query: string;
+  extraction: ExtractedEntities;
+  results: SearchResult[];
+  correlationGraph: CorrelationGraph | null;
+  insights: SearchInsights;
+  v2Insights?: {
+    patterns: number;
+    anomalies: number;
+    riskIndicators: number;
+  };
+  metadata: {
+    searchTime: number;
+    entitiesSearched: number;
+    iterationsPerformed: number;
+    totalRecordsSearched: number;
+    v2Enabled: boolean;
+  };
+}
+
+export interface SearchInsights {
+  highValueMatches: number;
+  totalConnections: number;
+  entityBreakdown: Record<string, number>;
+  topEntities: Array<{ value: string; type: string; occurrences: number }>;
+  redFlags: string[];
+  patterns: string[];
+  recommendations: string[];
 }
 
 // ============================================================================
-// CONFIGURATION
+// DATABASE SCHEMA CONFIGURATION
 // ============================================================================
 
-const CONFIG = {
-  maxPages: 500,
-  pageSize: 100,
-  maxResults: 50000,
-  paginationTimeout: 30000,
-  retryAttempts: 5,
-  retryDelay: 1000,
-  rateLimitRetryDelay: 5000,
-  maxIterations: 3,
-  maxEntitiesPerIteration: 5,
-  deduplicationThreshold: 0.95,
-  minMatchScore: 0.3,
-};
+interface TableSchema {
+  name: string;
+  searchableFields: string[];
+  entityTypeMapping: Record<string, string>;
+}
+
+const DEFAULT_TABLE_SCHEMAS: TableSchema[] = [
+  {
+    name: 'banking_transactions',
+    searchableFields: ['account_number', 'ifsc_code', 'pan_number', 'phone', 'email', 'name', 'amount', 'date'],
+    entityTypeMapping: {
+      account_number: 'account_number',
+      ifsc_code: 'ifsc_code',
+      pan_number: 'pan_number',
+      phone: 'phone',
+      email: 'email',
+      name: 'name',
+      amount: 'amount',
+      date: 'date',
+    },
+  },
+  {
+    name: 'telecom_records',
+    searchableFields: ['phone', 'name', 'address', 'email', 'id_proof', 'activation_date'],
+    entityTypeMapping: {
+      phone: 'phone',
+      name: 'name',
+      address: 'address',
+      email: 'email',
+      id_proof: 'id_number',
+    },
+  },
+  {
+    name: 'person_records',
+    searchableFields: ['name', 'phone', 'email', 'address', 'pan_number', 'aadhaar_number', 'dob'],
+    entityTypeMapping: {
+      name: 'name',
+      phone: 'phone',
+      email: 'email',
+      address: 'address',
+      pan_number: 'pan_number',
+      aadhaar_number: 'aadhaar_number',
+    },
+  },
+  {
+    name: 'vehicle_registrations',
+    searchableFields: ['vehicle_number', 'owner_name', 'address', 'phone', 'chassis_number', 'engine_number'],
+    entityTypeMapping: {
+      vehicle_number: 'vehicle_number',
+      owner_name: 'name',
+      address: 'address',
+      phone: 'phone',
+    },
+  },
+  {
+    name: 'property_records',
+    searchableFields: ['owner_name', 'address', 'phone', 'email', 'property_id', 'area'],
+    entityTypeMapping: {
+      owner_name: 'name',
+      address: 'address',
+      phone: 'phone',
+      email: 'email',
+    },
+  },
+  {
+    name: 'company_directors',
+    searchableFields: ['name', 'pan_number', 'din', 'address', 'phone', 'email', 'company_name'],
+    entityTypeMapping: {
+      name: 'name',
+      pan_number: 'pan_number',
+      address: 'address',
+      phone: 'phone',
+      email: 'email',
+      company_name: 'company',
+    },
+  },
+];
 
 // ============================================================================
-// ROBUST AGENT SEARCH ENGINE
+// ROBUST SEARCH ENGINE CLASS V2
 // ============================================================================
 
-export class RobustAgentSearchEngine {
-  private progressCallback?: (progress: ProgressUpdate) => void;
-  private apiBaseUrl: string;
-  private bearerToken?: string;
+export class RobustAgentSearch {
+  private entityExtractor: EntityExtractor;
+  private hybridExtractor: HybridEntityExtractor;
+  private queryParser: SemanticQueryParser;
+  private graphBuilder: KnowledgeGraphBuilder;
+  private relationshipInferrer: RelationshipInferrer;
+  private correlationEngine: CorrelationEngine;
+  private tableSchemas: TableSchema[];
+  private db: any;
 
-  // Tracking
-  private cursorsUsed: string[] = [];
-  private apiCalls = 0;
-  private earlyStopped = false;
-  private searchedTerms = new Set<string>();
-  private allDiscoveredEntities: ExtractedEntity[] = [];
-
-  constructor(options?: {
-    progressCallback?: (progress: ProgressUpdate) => void;
-    apiBaseUrl?: string;
-    bearerToken?: string;
-  }) {
-    this.progressCallback = options?.progressCallback;
-    this.apiBaseUrl = options?.apiBaseUrl || process.env.SEARCH_API_URL || 'http://localhost:8080';
-    this.bearerToken = options?.bearerToken;
-  }
-
-  private updateProgress(progress: ProgressUpdate): void {
-    logger.info(`Progress: ${progress.stage} - ${progress.message}`);
-    this.progressCallback?.(progress);
-  }
-
-  // =========================================================================
-  // STAGE 1: QUERY PARSING (Uses Entity Extractor)
-  // =========================================================================
-
-  /**
-   * Parse query using AI-powered entity extraction
-   * Only HIGH-VALUE entities become search terms!
-   */
-  async parseQuery(query: string): Promise<ParsedQuery> {
-    this.updateProgress({
-      stage: 'parsing',
-      message: 'Extracting entities using AI...',
-      progress: 5,
-      currentPage: 0,
-      totalResults: 0,
-      hasMore: false,
-    });
-
-    logger.info('Parsing query with AI entity extraction', { query });
-
-    // Use AI-powered entity extraction (falls back to regex if AI unavailable)
-    const extraction = await entityExtractor.extractWithAI(query);
-    
-    if (extraction.usedAI) {
-      logger.info('AI extraction used successfully');
-    } else {
-      logger.info('Using regex fallback for extraction');
-    }
-
-    // Convert to search criteria
-    const primaryCriteria: SearchCriterion[] = [];
-    const tertiaryCriteria: SearchCriterion[] = []; // MEDIUM value - addresses
-    const secondaryCriteria: SearchCriterion[] = [];
-
-    // HIGH-VALUE entities = primary (search terms)
-    for (const entity of (extraction.highValueEntities || [])) {
-      primaryCriteria.push({
-        id: `primary_${entity.type}_${entity.normalized}`,
-        type: 'primary',
-        category: entity.type as SearchCriterion['category'],
-        value: entity.original,
-        normalizedValue: entity.normalized,
-        description: `${entity.type}: ${entity.value}`,
-        confidence: entity.confidence,
-        searchValue: 'HIGH',
-      });
-    }
-
-    // MEDIUM-VALUE entities = tertiary (search after high-value)
-    for (const entity of (extraction.mediumValueEntities || [])) {
-      tertiaryCriteria.push({
-        id: `tertiary_${entity.type}_${entity.normalized.slice(0, 20)}`,
-        type: 'tertiary',
-        category: entity.type as SearchCriterion['category'],
-        value: entity.original,
-        normalizedValue: entity.normalized,
-        description: `${entity.type}: ${entity.value.slice(0, 30)}...`,
-        confidence: entity.confidence,
-        searchValue: 'MEDIUM',
-        specificity: entity.specificity,
-      });
-    }
-
-    // LOW-VALUE entities = secondary (filter terms)
-    for (const entity of (extraction.lowValueEntities || [])) {
-      secondaryCriteria.push({
-        id: `secondary_${entity.type}_${entity.normalized}`,
-        type: 'secondary',
-        category: entity.type as SearchCriterion['category'],
-        value: entity.original,
-        normalizedValue: entity.normalized,
-        description: `${entity.type}: ${entity.value}`,
-        confidence: entity.confidence,
-        searchValue: 'LOW',
-      });
-    }
-
-    // If no primary criteria, promote tertiary (addresses) or secondary
-    if (primaryCriteria.length === 0) {
-      if (tertiaryCriteria.length > 0) {
-        // Promote best address
-        const sorted = [...tertiaryCriteria].sort((a, b) => 
-          (b.specificity || 0) - (a.specificity || 0)
-        );
-        const promoted = sorted[0];
-        promoted.type = 'primary';
-        promoted.searchValue = 'HIGH';
-        primaryCriteria.push(promoted);
-        tertiaryCriteria.splice(0, 1);
-      } else if (secondaryCriteria.length > 0) {
-        const sorted = [...secondaryCriteria].sort((a, b) => 
-          b.normalizedValue.length - a.normalizedValue.length
-        );
-        const promoted = sorted[0];
-        promoted.type = 'primary';
-        promoted.searchValue = 'HIGH';
-        primaryCriteria.push(promoted);
-        secondaryCriteria.splice(0, 1);
-      }
-    }
-
-    // If still no criteria, use whole query
-    if (primaryCriteria.length === 0) {
-      primaryCriteria.push({
-        id: 'keyword_1',
-        type: 'primary',
-        category: 'keyword',
-        value: query,
-        normalizedValue: query.toLowerCase(),
-        description: `Search: ${query}`,
-        confidence: 0.5,
-        searchValue: 'HIGH',
-      });
-    }
-
-    const intent = this.determineIntent(primaryCriteria, tertiaryCriteria, secondaryCriteria);
-
-    logger.info('Query parsed', {
-      primary: primaryCriteria.map(c => `${c.category}:${c.normalizedValue}`),
-      tertiary: tertiaryCriteria.map(c => `${c.category}:${c.normalizedValue.slice(0, 20)}`),
-      secondary: secondaryCriteria.map(c => `${c.category}:${c.normalizedValue}`),
-      intent,
-      usedAI: extraction.usedAI,
-    });
-
-    return {
-      originalQuery: query,
-      primaryCriteria,
-      tertiaryCriteria,
-      secondaryCriteria,
-      intent,
-      aiEntityExtraction: extraction.usedAI,
-    };
-  }
-
-  private determineIntent(primary: SearchCriterion[], tertiary: SearchCriterion[], secondary: SearchCriterion[]): string {
-    const primaryTypes = new Set(primary.map(c => c.category));
-    const tertiaryTypes = new Set(tertiary.map(c => c.category));
-    const secondaryTypes = new Set(secondary.map(c => c.category));
-
-    if (primaryTypes.has('phone')) return 'Find person by phone number';
-    if (primaryTypes.has('email')) return 'Find person by email';
-    if (primaryTypes.has('id_number')) return 'Find records by ID number';
-    if (primaryTypes.has('account')) return 'Find records by account number';
-    if (primaryTypes.has('address') || tertiaryTypes.has('address')) return 'Find people at address';
-    if (secondaryTypes.has('name') && secondaryTypes.has('location')) return 'Find person by name and location';
-    return 'General search';
-  }
-
-  // =========================================================================
-  // STAGE 2: ITERATIVE SEARCH WITH PAGINATION
-  // =========================================================================
-
-  /**
-   * Execute search - searches HIGH-VALUE first, then MEDIUM-VALUE (addresses)
-   */
-  async executeIterativeSearch(parsedQuery: ParsedQuery): Promise<PaginatedResult[]> {
-    const allResults: PaginatedResult[] = [];
-    this.searchedTerms.clear();
-    this.allDiscoveredEntities = [];
-    let iterations = 0;
-
-    // Get primary search term (highest priority)
-    const primarySearch = parsedQuery.primaryCriteria
-      .sort((a, b) => {
-        const priorityOrder: Record<string, number> = {
-          phone: 10, email: 9, id_number: 8, account: 7, address: 4, keyword: 1
-        };
-        return (priorityOrder[b.category] || 0) - (priorityOrder[a.category] || 0);
-      })[0];
-
-    if (!primarySearch) {
-      logger.warn('No primary search criteria found');
-      return [];
-    }
-
-    // Initial search
-    this.updateProgress({
-      stage: 'searching',
-      message: `Searching for "${primarySearch.normalizedValue.slice(0, 30)}"...`,
-      progress: 10,
-      currentPage: 0,
-      totalResults: 0,
-      hasMore: false,
-    });
-
-    const initialResults = await this.searchWithPagination(primarySearch.normalizedValue);
-    
-    // Add unique results
-    for (const result of initialResults) {
-      if (!this.isDuplicateResult(result, allResults)) {
-        allResults.push(result);
-      }
-    }
-    
-    this.searchedTerms.add(primarySearch.normalizedValue.toLowerCase());
-
-    // Extract HIGH-VALUE entities from initial results
-    const initialEntities = this.extractHighValueEntities(initialResults);
-    this.allDiscoveredEntities.push(...initialEntities);
-
-    // Extract MEDIUM-VALUE entities (addresses) from initial results
-    const initialAddresses = this.extractMediumValueEntities(initialResults);
-    this.allDiscoveredEntities.push(...initialAddresses);
-
-    iterations = 1;
-
-    // Phase 1: Iterative search for HIGH-VALUE identifiers
-    while (iterations < CONFIG.maxIterations) {
-      const newSearchTerms = this.getNewHighValueSearchTerms();
-
-      if (newSearchTerms.length === 0) {
-        logger.info('No new high-value identifiers found');
-        break;
-      }
-
-      this.updateProgress({
-        stage: 'iterating',
-        message: `Iteration ${iterations + 1}: Searching ${newSearchTerms.length} new identifiers...`,
-        progress: 10 + (iterations * 10),
-        currentPage: 0,
-        totalResults: allResults.length,
-        hasMore: false,
-        iteration: iterations + 1,
-        discoveredEntities: newSearchTerms,
-      });
-
-      // Search each new HIGH-VALUE term
-      for (const term of newSearchTerms) {
-        this.searchedTerms.add(term.toLowerCase());
-
-        const newResults = await this.searchWithPagination(term);
-        
-        for (const result of newResults) {
-          if (!this.isDuplicateResult(result, allResults)) {
-            allResults.push(result);
-          }
-        }
-
-        if (allResults.length >= CONFIG.maxResults) {
-          logger.warn(`Max results limit reached: ${CONFIG.maxResults}`);
-          this.earlyStopped = true;
-          break;
-        }
-      }
-
-      // Extract new entities for next iteration
-      const newEntities = this.extractHighValueEntities(allResults);
-      const newAddresses = this.extractMediumValueEntities(allResults);
-      this.allDiscoveredEntities = this.mergeEntities(this.allDiscoveredEntities, [...newEntities, ...newAddresses]);
-
-      iterations++;
-      if (allResults.length >= CONFIG.maxResults) break;
-    }
-
-    // Phase 2: Search for MEDIUM-VALUE entities (addresses) if we have few results
-    if (allResults.length < 50 && this.allDiscoveredEntities.filter(e => e.type === 'address').length > 0) {
-      const addressTerms = this.getNewMediumValueSearchTerms();
-      
-      if (addressTerms.length > 0) {
-        this.updateProgress({
-          stage: 'iterating',
-          message: `Searching ${addressTerms.length} discovered addresses for more leads...`,
-          progress: 60,
-          currentPage: 0,
-          totalResults: allResults.length,
-          hasMore: false,
-          iteration: iterations + 1,
-          discoveredEntities: addressTerms.map(a => a.slice(0, 20) + '...'),
-        });
-
-        for (const address of addressTerms.slice(0, 3)) { // Limit to top 3 addresses
-          if (this.searchedTerms.has(address.toLowerCase())) continue;
-          this.searchedTerms.add(address.toLowerCase());
-
-          const addressResults = await this.searchWithPagination(address);
-          
-          for (const result of addressResults) {
-            if (!this.isDuplicateResult(result, allResults)) {
-              allResults.push(result);
-            }
-          }
-
-          if (allResults.length >= CONFIG.maxResults) break;
-        }
-
-        // Extract any new high-value entities from address search
-        const newFromAddress = this.extractHighValueEntities(allResults);
-        this.allDiscoveredEntities = this.mergeEntities(this.allDiscoveredEntities, newFromAddress);
-      }
-    }
-
-    // Also search addresses from parsedQuery if we haven't already
-    if (parsedQuery.tertiaryCriteria && parsedQuery.tertiaryCriteria.length > 0 && allResults.length < 100) {
-      for (const addr of parsedQuery.tertiaryCriteria.slice(0, 2)) {
-        if (this.searchedTerms.has(addr.normalizedValue.toLowerCase())) continue;
-        
-        this.updateProgress({
-          stage: 'iterating',
-          message: `Searching address: "${addr.normalizedValue.slice(0, 25)}..."`,
-          progress: 70,
-          currentPage: 0,
-          totalResults: allResults.length,
-          hasMore: false,
-          iteration: iterations + 1,
-        });
-
-        this.searchedTerms.add(addr.normalizedValue.toLowerCase());
-        const addrResults = await this.searchWithPagination(addr.normalizedValue);
-        
-        for (const result of addrResults) {
-          if (!this.isDuplicateResult(result, allResults)) {
-            allResults.push(result);
-          }
-        }
-
-        // Extract new entities
-        const newEntities = this.extractHighValueEntities(addrResults);
-        this.allDiscoveredEntities = this.mergeEntities(this.allDiscoveredEntities, newEntities);
-      }
-    }
-
-    logger.info('Iterative search complete', {
-      results: allResults.length,
-      iterations,
-      highValueEntities: this.allDiscoveredEntities.filter(e => e.searchValue === 'HIGH').length,
-      mediumValueEntities: this.allDiscoveredEntities.filter(e => e.searchValue === 'MEDIUM').length,
-    });
-
-    return allResults;
+  constructor(db?: any, schemas?: TableSchema[]) {
+    this.entityExtractor = new EntityExtractor();
+    this.hybridExtractor = new HybridEntityExtractor();
+    this.queryParser = new SemanticQueryParser(this.hybridExtractor);
+    this.graphBuilder = new KnowledgeGraphBuilder();
+    this.relationshipInferrer = new RelationshipInferrer();
+    this.correlationEngine = new CorrelationEngine();
+    this.tableSchemas = schemas || DEFAULT_TABLE_SCHEMAS;
+    this.db = db;
   }
 
   /**
-   * Search with cursor-based pagination
+   * Main search method - Enhanced with V2 features
    */
-  private async searchWithPagination(searchTerm: string): Promise<PaginatedResult[]> {
-    const allResults: PaginatedResult[] = [];
-    let cursor: string | undefined = undefined;
-    let hasMore = true;
-    let pageCount = 0;
-
-    while (hasMore && pageCount < CONFIG.maxPages) {
-      const progressPercent = Math.min(70, 10 + (pageCount / CONFIG.maxPages) * 50);
-
-      this.updateProgress({
-        stage: pageCount === 0 ? 'searching' : 'paginating',
-        message: `Fetching page ${pageCount + 1} (${allResults.length.toLocaleString()} results)...`,
-        progress: progressPercent,
-        currentPage: pageCount + 1,
-        totalResults: allResults.length,
-        hasMore,
-      });
-
-      try {
-        const response = await this.fetchPage(searchTerm, cursor);
-        this.apiCalls++;
-        pageCount++;
-
-        if (cursor) {
-          this.cursorsUsed.push(cursor);
-        }
-
-        // Process results
-        if (response.results) {
-          for (const [table, records] of Object.entries(response.results) as [string, unknown[]][]) {
-            if (Array.isArray(records)) {
-              for (const record of records) {
-                const result = this.processResult(table, record as Record<string, unknown>);
-                allResults.push(result);
-              }
-            }
-          }
-        }
-
-        hasMore = response.has_more || false;
-        cursor = response.next_cursor || undefined;
-
-        if (allResults.length >= CONFIG.maxResults) {
-          this.earlyStopped = true;
-          break;
-        }
-
-        if (hasMore && !cursor) {
-          logger.warn('has_more is true but no cursor provided');
-          break;
-        }
-
-      } catch (error) {
-        logger.error(`Error fetching page ${pageCount + 1}`, error);
-        break;
-      }
-    }
-
-    return allResults;
-  }
-
-  private async fetchPage(
+  async search(
     query: string,
-    cursor?: string
-  ): Promise<{
-    results: Record<string, unknown[]>;
-    has_more: boolean;
-    next_cursor: string | null;
-  }> {
-    const url = new URL('/api/search', this.apiBaseUrl);
-    url.searchParams.set('q', query);
-    url.searchParams.set('limit', String(CONFIG.pageSize));
-    if (cursor) {
-      url.searchParams.set('cursor', cursor);
+    options: SearchOptions = {}
+  ): Promise<SearchResponse> {
+    const startTime = Date.now();
+    const {
+      maxIterations = 5,
+      maxResultsPerEntity = 100,
+      minConfidence = 0.5,
+      includeGraph = true,
+      enableV2 = true,
+      analyzeCorrelations = true,
+      onProgress,
+    } = options;
+
+    let currentIteration = 0;
+    let totalRecordsSearched = 0;
+    const allResults: SearchResult[] = [];
+    const searchedEntities = new Set<string>();
+    const discoveredEntities: Entity[] = [];
+
+    // Phase 1: Parse query with semantic understanding (V2)
+    onProgress?.({
+      phase: 'extracting',
+      message: enableV2 ? 'Parsing query with semantic analysis...' : 'Extracting entities from query...',
+      progress: 5,
+      entitiesFound: 0,
+      resultsFound: 0,
+    });
+
+    let parsedQuery;
+    let initialExtraction: ExtractedEntities;
+
+    if (enableV2) {
+      parsedQuery = await this.queryParser.parse(query);
+      // Convert V2 entities to V1 format for backward compatibility
+      const v2Entities = await this.hybridExtractor.extract(query);
+      initialExtraction = this.convertV2ToV1Entities(v2Entities, query);
+    } else {
+      initialExtraction = this.entityExtractor.extract(query);
     }
 
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (this.bearerToken) {
-      headers['Authorization'] = `Bearer ${this.bearerToken}`;
-    }
+    // Get HIGH and MEDIUM value entities to search
+    const searchEntities = [
+      ...initialExtraction.highValue,
+      ...initialExtraction.mediumValue,
+    ];
 
-    let lastError: Error | null = null;
+    // Get LOW value entities for filtering
+    const filterEntities = initialExtraction.lowValue;
 
-    for (let attempt = 1; attempt <= CONFIG.retryAttempts; attempt++) {
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), CONFIG.paginationTimeout);
+    // Phase 2: Iterative search
+    while (currentIteration < maxIterations && searchEntities.length > 0) {
+      currentIteration++;
 
-        const response = await fetch(url.toString(), {
-          method: 'GET',
-          headers,
-          signal: controller.signal,
+      onProgress?.({
+        phase: 'searching',
+        message: `Iteration ${currentIteration}: Searching ${searchEntities.length} entities...`,
+        progress: 10 + (currentIteration / maxIterations) * 40,
+        entitiesFound: searchEntities.length,
+        resultsFound: allResults.length,
+      });
+
+      // Search for each entity
+      for (const entity of searchEntities) {
+        const entityKey = `${entity.type}:${entity.value}`;
+
+        if (searchedEntities.has(entityKey)) continue;
+        searchedEntities.add(entityKey);
+
+        onProgress?.({
+          phase: 'searching',
+          message: `Searching for ${entity.type}: ${entity.value}...`,
+          progress: 10 + (currentIteration / maxIterations) * 40,
+          entitiesFound: searchedEntities.size,
+          resultsFound: allResults.length,
+          currentEntity: entity.value,
         });
 
-        clearTimeout(timeoutId);
+        // Search database
+        const results = await this.searchDatabase(entity, maxResultsPerEntity);
+        totalRecordsSearched += results.length;
+        allResults.push(...results);
+      }
 
-        if (response.status === 429) {
-          const retryAfter = response.headers.get('Retry-After');
-          const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : CONFIG.rateLimitRetryDelay * attempt;
-          
-          if (attempt < CONFIG.retryAttempts) {
-            await new Promise(resolve => setTimeout(resolve, waitTime));
-            continue;
-          }
-        }
+      // Phase 3: Discover new entities from results
+      if (currentIteration < maxIterations) {
+        onProgress?.({
+          phase: 'discovering',
+          message: `Discovering new entities from ${allResults.length} results...`,
+          progress: 55,
+          entitiesFound: searchedEntities.size,
+          resultsFound: allResults.length,
+        });
 
-        if (!response.ok) {
-          throw new Error(`API returned ${response.status}`);
-        }
+        // Extract entities from results
+        const newEntities = await this.discoverEntitiesFromResults(
+          allResults, 
+          searchedEntities,
+          enableV2
+        );
+        discoveredEntities.push(...newEntities);
 
-        return await response.json();
-
-      } catch (error) {
-        lastError = error as Error;
-        if (attempt < CONFIG.retryAttempts) {
-          const delay = CONFIG.retryDelay * Math.pow(2, attempt - 1);
-          await new Promise(resolve => setTimeout(resolve, delay));
-        }
+        // Update search entities for next iteration
+        searchEntities.length = 0;
+        searchEntities.push(
+          ...newEntities.filter(e => e.priority === 'HIGH' || e.priority === 'MEDIUM')
+        );
       }
     }
 
-    throw lastError || new Error('Failed to fetch page');
-  }
+    // Phase 4: Build correlation graph with V2 enhancements
+    let correlationGraph: CorrelationGraph | null = null;
+    if (includeGraph) {
+      onProgress?.({
+        phase: 'building_graph',
+        message: enableV2 ? 'Building knowledge graph with entity resolution...' : 'Building correlation graph...',
+        progress: 70,
+        entitiesFound: searchedEntities.size,
+        resultsFound: allResults.length,
+      });
 
-  private processResult(table: string, record: Record<string, unknown>): PaginatedResult {
+      correlationGraph = this.buildCorrelationGraph(allResults, enableV2);
+    }
+
+    // Phase 5: Advanced correlation analysis (V2)
+    let v2Insights;
+    if (enableV2 && analyzeCorrelations && correlationGraph) {
+      onProgress?.({
+        phase: 'analyzing',
+        message: 'Running advanced pattern and anomaly detection...',
+        progress: 85,
+        entitiesFound: searchedEntities.size,
+        resultsFound: allResults.length,
+      });
+
+      v2Insights = await this.runAdvancedAnalysis(correlationGraph);
+    }
+
+    // Phase 6: Filter results
+    onProgress?.({
+      phase: 'filtering',
+      message: 'Filtering results based on query criteria...',
+      progress: 90,
+      entitiesFound: searchedEntities.size,
+      resultsFound: allResults.length,
+    });
+
+    const filteredResults = this.filterResults(allResults, filterEntities, initialExtraction.relationships);
+
+    // Generate insights (enhanced with V2)
+    const insights = this.generateInsights(
+      filteredResults, 
+      initialExtraction, 
+      correlationGraph,
+      v2Insights
+    );
+
+    const searchTime = Date.now() - startTime;
+
+    onProgress?.({
+      phase: 'complete',
+      message: 'Search complete!',
+      progress: 100,
+      entitiesFound: searchedEntities.size,
+      resultsFound: filteredResults.length,
+    });
+
     return {
-      table,
-      record,
-      pageNumber: 0,
-      cursor: null,
-      entitySignature: this.generateEntitySignature(record, table),
+      success: true,
+      query,
+      extraction: initialExtraction,
+      results: filteredResults,
+      correlationGraph,
+      insights,
+      v2Insights: v2Insights ? {
+        patterns: v2Insights.patterns.length,
+        anomalies: v2Insights.anomalies.length,
+        riskIndicators: v2Insights.riskIndicators.length,
+      } : undefined,
+      metadata: {
+        searchTime,
+        entitiesSearched: searchedEntities.size,
+        iterationsPerformed: currentIteration,
+        totalRecordsSearched,
+        v2Enabled: enableV2,
+      },
     };
   }
 
-  private generateEntitySignature(record: Record<string, unknown>, table?: string): string {
-    const parts: string[] = [];
-
-    // Include table name in signature - different tables are NOT duplicates!
-    // They could be snapshots at different times with different data
-    if (table) {
-      parts.push(`table:${table}`);
-    }
-
-    // Phone is most unique
-    const phone = this.getFieldValue(record, ['phone', 'mobile', 'glusr_usr_ph_mobile']);
-    if (phone) {
-      parts.push(`phone:${String(phone).replace(/\D/g, '').slice(-10)}`);
-    }
-
-    // Email
-    const email = this.getFieldValue(record, ['email', 'email1', 'email_id']);
-    if (email) {
-      parts.push(`email:${String(email).toLowerCase()}`);
-    }
-
-    // Record ID from database
-    const recordId = record.id || record._id || record.global_id || record.glusr_id;
-    if (recordId) {
-      parts.push(`recordId:${recordId}`);
-    }
-
-    if (parts.length === 0) {
-      // Use hash of full record as last resort
-      parts.push(`hash:${JSON.stringify(record).slice(0, 100)}`);
-    }
-
-    return parts.join('|');
-  }
-
-  private getFieldValue(record: Record<string, unknown>, fields: string[]): string | null {
-    for (const field of fields) {
-      const value = record[field];
-      if (value !== null && value !== undefined && value !== '') {
-        return String(value);
-      }
-    }
-    return null;
-  }
-
-  // =========================================================================
-  // STAGE 3: ENTITY EXTRACTION (Uses Entity Extractor)
-  // =========================================================================
-
   /**
-   * Extract ONLY HIGH-VALUE entities from results
-   * Uses the new entity-extractor module
+   * Convert V2 entities to V1 format for backward compatibility
    */
-  private extractHighValueEntities(results: PaginatedResult[]): ExtractedEntity[] {
-    const entities: ExtractedEntity[] = [];
-    const seen = new Set<string>();
-
-    for (const result of results) {
-      const extraction = entityExtractor.extractFromRecord(result.record, result.table);
-
-      for (const entity of extraction.highValueEntities) {
-        const key = `${entity.type}:${entity.normalized}`;
-        if (!seen.has(key)) {
-          seen.add(key);
-          entities.push(entity);
-        }
-      }
-    }
-
-    return entities;
-  }
-
-  /**
-   * Extract MEDIUM-VALUE entities (specific addresses) from results
-   * These are addresses with high specificity scores
-   */
-  private extractMediumValueEntities(results: PaginatedResult[]): ExtractedEntity[] {
-    const entities: ExtractedEntity[] = [];
-    const seen = new Set<string>();
-
-    for (const result of results) {
-      const extraction = entityExtractor.extractFromRecord(result.record, result.table);
-
-      for (const entity of extraction.mediumValueEntities) {
-        const key = `${entity.type}:${entity.normalized.toLowerCase()}`;
-        if (!seen.has(key)) {
-          seen.add(key);
-          entities.push(entity);
-        }
-      }
-    }
-
-    return entities;
-  }
-
-  /**
-   * Get new HIGH-VALUE search terms (not already searched)
-   * CRITICAL: Only returns phone, email, id_number, account
-   */
-  private getNewHighValueSearchTerms(): string[] {
-    const terms: string[] = [];
-    const seen = new Set<string>();
-
-    // Priority order - ONLY HIGH-VALUE types
-    const typePriority = ['phone', 'email', 'id_number', 'account'];
-
-    for (const type of typePriority) {
-      for (const entity of this.allDiscoveredEntities) {
-        if (entity.type !== type) continue;
-        if (this.searchedTerms.has(entity.normalized.toLowerCase())) continue;
-        if (seen.has(entity.normalized)) continue;
-
-        seen.add(entity.normalized);
-        terms.push(entity.normalized);
-
-        if (terms.length >= CONFIG.maxEntitiesPerIteration) break;
-      }
-      if (terms.length >= CONFIG.maxEntitiesPerIteration) break;
-    }
-
-    return terms;
-  }
-
-  /**
-   * Get new MEDIUM-VALUE search terms (specific addresses not already searched)
-   * Returns addresses with high specificity for lead discovery
-   */
-  private getNewMediumValueSearchTerms(): string[] {
-    const terms: string[] = [];
-    const seen = new Set<string>();
-
-    for (const entity of this.allDiscoveredEntities) {
-      // Only get address entities with MEDIUM value
-      if (entity.type !== 'address') continue;
-      if (entity.searchValue !== 'MEDIUM') continue;
-      if (this.searchedTerms.has(entity.normalized.toLowerCase())) continue;
-      if (seen.has(entity.normalized)) continue;
-
-      // Only include addresses with good specificity
-      if ((entity.specificity || 0) < 0.3) continue;
-
-      seen.add(entity.normalized);
-      terms.push(entity.normalized);
-
-      if (terms.length >= 5) break; // Limit addresses
-    }
-
-    return terms;
-  }
-
-  private mergeEntities(existing: ExtractedEntity[], newEntities: ExtractedEntity[]): ExtractedEntity[] {
-    const merged = [...existing];
-    const seen = new Set(existing.map(e => `${e.type}:${e.normalized}`));
-
-    for (const entity of newEntities) {
-      const key = `${entity.type}:${entity.normalized}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        merged.push(entity);
-      }
-    }
-
-    return merged;
-  }
-
-  private isDuplicateResult(result: PaginatedResult, existing: PaginatedResult[]): boolean {
-    return existing.some(r => r.entitySignature === result.entitySignature);
-  }
-
-  // =========================================================================
-  // STAGE 4: FILTERING & DEDUPLICATION (Uses Embedding Service)
-  // =========================================================================
-
-  /**
-   * Filter results using LOW-VALUE criteria
-   * Deduplicate using semantic similarity
-   */
-  async filterAndDeduplicate(
-    results: PaginatedResult[],
-    filters: SearchCriterion[]
-  ): Promise<{ filtered: FilteredResult[]; duplicatesRemoved: number }> {
-    this.updateProgress({
-      stage: 'filtering',
-      message: 'Filtering and deduplicating results...',
-      progress: 75,
-      currentPage: 0,
-      totalResults: results.length,
-      hasMore: false,
-    });
-
-    // Convert to filtered results
-    let filtered = results.map((r, i) => ({
-      id: `${r.table}:${i}`,
-      table: r.table,
-      record: r.record,
-      matchedFilters: [],
-      matchScore: 1.0,
-      highlights: {},
+  private convertV2ToV1Entities(v2Entities: V2Entity[], query: string): ExtractedEntities {
+    const entities: Entity[] = v2Entities.map(e => ({
+      type: e.type,
+      value: e.value,
+      originalText: e.originalText,
+      priority: e.priority,
+      confidence: e.confidence,
+      position: e.position,
     }));
 
-    // Apply filters
-    if (filters.length > 0) {
-      filtered = filtered.filter(result => {
-        for (const filter of filters) {
-          if (this.recordMatchesFilter(result.record, filter)) {
-            result.matchedFilters.push(filter.description);
-            result.matchScore += 0.2;
-          }
-        }
-        return result.matchedFilters.length > 0 || filters.length === 0;
-      });
-    }
-
-    // Deduplicate by signature (now includes table name, so different tables won't be duplicates)
-    const uniqueMap = new Map<string, FilteredResult>();
-    for (const result of filtered) {
-      const sig = this.generateEntitySignature(result.record, result.table);
-      if (!uniqueMap.has(sig)) {
-        uniqueMap.set(sig, result);
-      }
-    }
-
-    const deduplicated = Array.from(uniqueMap.values());
-    let duplicatesRemoved = filtered.length - deduplicated.length;
-
-    // Semantic deduplication - only for records from the SAME table
-    // Records from different tables are kept (they could be snapshots)
-    const finalResults: FilteredResult[] = [];
-    const processed = new Set<string>();
-
-    // Group by table for smarter deduplication
-    const tableGroups = new Map<string, FilteredResult[]>();
-    for (const result of deduplicated) {
-      if (!tableGroups.has(result.table)) {
-        tableGroups.set(result.table, []);
-      }
-      tableGroups.get(result.table)!.push(result);
-    }
-
-    // Deduplicate within each table separately
-    for (const [table, tableResults] of tableGroups) {
-      const tableFinal: FilteredResult[] = [];
-      
-      for (const result of tableResults) {
-        if (processed.has(result.id)) continue;
-
-        // Check semantic similarity only within same table
-        let isDuplicate = false;
-        for (const existing of tableFinal.slice(-20)) {
-          try {
-            const similarity = await recordSimilarity(result.record, existing.record);
-            if (similarity >= CONFIG.deduplicationThreshold) {
-              isDuplicate = true;
-              duplicatesRemoved++;
-              break;
-            }
-          } catch {
-            // Skip similarity check on error
-          }
-        }
-
-        if (!isDuplicate) {
-          tableFinal.push(result);
-        }
-        processed.add(result.id);
-      }
-      
-      finalResults.push(...tableFinal);
-    }
-
-    // Sort by match score
-    finalResults.sort((a, b) => b.matchScore - a.matchScore);
-
-    logger.info('Filtering complete', {
-      original: results.length,
-      afterFilter: filtered.length,
-      afterDedup: finalResults.length,
-      duplicatesRemoved,
-    });
-
-    return { filtered: finalResults, duplicatesRemoved };
-  }
-
-  private recordMatchesFilter(record: Record<string, unknown>, filter: SearchCriterion): boolean {
-    const filterValue = filter.normalizedValue.toLowerCase();
-
-    for (const [, value] of Object.entries(record)) {
-      if (value === null || value === undefined) continue;
-      const strValue = String(value).toLowerCase();
-      if (strValue.includes(filterValue)) {
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  // =========================================================================
-  // STAGE 5: BUILD CORRELATION GRAPH
-  // =========================================================================
-
-  buildCorrelationGraph(results: FilteredResult[]): CorrelationGraph {
-    const nodeMap = new Map<string, CorrelationNode>();
-    const edges: CorrelationEdge[] = [];
-
-    const fieldCategories: Record<string, CorrelationNode['type']> = {
-      name: 'person', first_name: 'person', last_name: 'person', full_name: 'person',
-      phone: 'phone', mobile: 'phone', glusr_usr_ph_mobile: 'phone',
-      email: 'email', email1: 'email',
-      city: 'location', state: 'location', address: 'location',
-      company_name: 'company',
-      account: 'account', account_number: 'account',
-      pan: 'id', aadhaar: 'id', id_number: 'id',
+    return {
+      entities,
+      highValue: entities.filter(e => e.priority === 'HIGH'),
+      mediumValue: entities.filter(e => e.priority === 'MEDIUM'),
+      lowValue: entities.filter(e => e.priority === 'LOW'),
+      relationships: [],
+      originalQuery: query,
+      extractionTime: 0,
     };
+  }
+
+  /**
+   * Search database for a specific entity
+   */
+  private async searchDatabase(entity: Entity, limit: number): Promise<SearchResult[]> {
+    const results: SearchResult[] = [];
+
+    for (const schema of this.tableSchemas) {
+      const matchingFields = this.findMatchingFields(entity, schema);
+      if (matchingFields.length === 0) continue;
+
+      const query = this.buildSearchQuery(schema, matchingFields, entity, limit);
+      const records = await this.executeSearch(query, schema.name);
+
+      for (const record of records) {
+        const result: SearchResult = {
+          id: `${schema.name}_${record.id || Math.random().toString(36).substr(2, 9)}`,
+          tableName: schema.name,
+          data: record,
+          matchedFields: matchingFields,
+          matchedEntities: [entity],
+          score: this.calculateScore(record, entity, matchingFields),
+        };
+        results.push(result);
+      }
+    }
+
+    return results;
+  }
+
+  /**
+   * Find matching fields in a table schema for an entity
+   */
+  private findMatchingFields(entity: Entity, schema: TableSchema): string[] {
+    const matchingFields: string[] = [];
+    for (const [fieldName, entityType] of Object.entries(schema.entityTypeMapping)) {
+      if (entityType === entity.type) {
+        matchingFields.push(fieldName);
+      }
+    }
+    return matchingFields;
+  }
+
+  /**
+   * Build search query for database
+   */
+  private buildSearchQuery(
+    schema: TableSchema,
+    fields: string[],
+    entity: Entity,
+    limit: number
+  ): any {
+    return {
+      table: schema.name,
+      conditions: fields.map(field => ({
+        field,
+        operator: 'LIKE',
+        value: entity.value,
+      })),
+      limit,
+    };
+  }
+
+  /**
+   * Execute search query (mock implementation)
+   */
+  private async executeSearch(query: any, tableName: string): Promise<any[]> {
+    try {
+      if (this.db) {
+        const results = await this.db.query(query);
+        return results;
+      }
+    } catch (error) {
+      console.error('Search error:', error);
+    }
+    return [];
+  }
+
+  /**
+   * Calculate relevance score for a result
+   */
+  private calculateScore(record: any, entity: Entity, matchedFields: string[]): number {
+    let score = 0.5;
+
+    for (const field of matchedFields) {
+      if (record[field] === entity.value) {
+        score += 0.3;
+      } else if (String(record[field]).toLowerCase().includes(entity.value.toLowerCase())) {
+        score += 0.1;
+      }
+    }
+
+    if (entity.priority === 'HIGH') score += 0.2;
+    else if (entity.priority === 'MEDIUM') score += 0.1;
+
+    score *= entity.confidence;
+    return Math.min(1, score);
+  }
+
+  /**
+   * Discover new entities from search results (V2 enhanced)
+   */
+  private async discoverEntitiesFromResults(
+    results: SearchResult[],
+    alreadySearched: Set<string>,
+    useV2: boolean
+  ): Promise<Entity[]> {
+    const discoveredEntities: Entity[] = [];
 
     for (const result of results) {
-      const recordNodes: string[] = [];
-
-      for (const [field, value] of Object.entries(result.record)) {
-        if (value === null || value === undefined || value === '') continue;
-
-        const fieldType = fieldCategories[field.toLowerCase()] || 'other';
-        const normalizedValue = String(value).toLowerCase().trim();
-
-        if (normalizedValue.length < 2) continue;
-
-        const nodeId = `${fieldType}:${normalizedValue}`;
-
-        if (!nodeMap.has(nodeId)) {
-          nodeMap.set(nodeId, {
-            id: nodeId,
-            type: fieldType,
-            value: String(value),
-            count: 0,
-            connections: [],
-            sources: [],
-          });
-        }
-
-        const node = nodeMap.get(nodeId)!;
-        node.count++;
-        if (!node.sources.includes(result.table)) {
-          node.sources.push(result.table);
-        }
-        recordNodes.push(nodeId);
+      const dataString = JSON.stringify(result.data);
+      
+      let extracted: Entity[];
+      if (useV2) {
+        const v2Entities = await this.hybridExtractor.extract(dataString);
+        extracted = v2Entities.map(e => ({
+          type: e.type,
+          value: e.value,
+          originalText: e.originalText,
+          priority: e.priority,
+          confidence: e.confidence,
+        }));
+      } else {
+        const v1Extracted = this.entityExtractor.extract(dataString);
+        extracted = v1Extracted.entities;
       }
 
-      // Create edges
-      for (let i = 0; i < recordNodes.length; i++) {
-        for (let j = i + 1; j < recordNodes.length; j++) {
-          const source = recordNodes[i];
-          const target = recordNodes[j];
+      for (const entity of extracted.filter(e => e.priority === 'HIGH' || e.priority === 'MEDIUM')) {
+        const key = `${entity.type}:${entity.value}`;
+        if (!alreadySearched.has(key)) {
+          discoveredEntities.push(entity);
+        }
+      }
+    }
 
-          if (!nodeMap.get(source)!.connections.includes(target)) {
-            nodeMap.get(source)!.connections.push(target);
+    // Deduplicate
+    const uniqueEntities = new Map<string, Entity>();
+    for (const entity of discoveredEntities) {
+      const key = `${entity.type}:${entity.value}`;
+      if (!uniqueEntities.has(key)) {
+        uniqueEntities.set(key, entity);
+      }
+    }
+
+    return Array.from(uniqueEntities.values());
+  }
+
+  /**
+   * Build correlation graph (V2 enhanced with entity resolution)
+   */
+  private buildCorrelationGraph(results: SearchResult[], useV2: boolean): CorrelationGraph {
+    const nodes: CorrelationNode[] = [];
+    const edges: CorrelationEdge[] = [];
+    const nodeMap = new Map<string, CorrelationNode>();
+    const clusters = new Map<string, string[]>();
+
+    for (const result of results) {
+      const dataString = JSON.stringify(result.data);
+      let entities: Entity[];
+
+      if (useV2) {
+        // Use hybrid extractor for better entity resolution
+        const v2Entities = this.entityExtractor.extract(dataString);
+        entities = v2Entities.entities;
+      } else {
+        const extracted = this.entityExtractor.extract(dataString);
+        entities = extracted.entities;
+      }
+
+      // Create nodes for each entity
+      for (const entity of entities) {
+        const nodeId = `${entity.type}:${entity.value}`;
+
+        if (!nodeMap.has(nodeId)) {
+          const node: CorrelationNode = {
+            id: nodeId,
+            type: this.mapEntityTypeToNodeType(entity.type),
+            label: entity.value,
+            entityType: entity.type,
+            value: entity.value,
+            connections: [],
+            occurrences: 1,
+            sources: [result.tableName],
+            riskScore: entity.priority === 'HIGH' ? 0.8 : entity.priority === 'MEDIUM' ? 0.5 : 0.2,
+          };
+          nodeMap.set(nodeId, node);
+          nodes.push(node);
+        } else {
+          const node = nodeMap.get(nodeId)!;
+          node.occurrences++;
+          if (!node.sources.includes(result.tableName)) {
+            node.sources.push(result.tableName);
           }
-          if (!nodeMap.get(target)!.connections.includes(source)) {
-            nodeMap.get(target)!.connections.push(source);
-          }
+        }
+      }
+
+      // Create edges between entities from the same result
+      const entityIds = entities.map(e => `${e.type}:${e.value}`);
+      for (let i = 0; i < entityIds.length; i++) {
+        for (let j = i + 1; j < entityIds.length; j++) {
+          const sourceId = entityIds[i];
+          const targetId = entityIds[j];
 
           const existingEdge = edges.find(
-            e => (e.source === source && e.target === target) ||
-                 (e.source === target && e.target === source)
+            e => (e.source === sourceId && e.target === targetId) ||
+                 (e.source === targetId && e.target === sourceId)
           );
 
           if (existingEdge) {
             existingEdge.weight++;
+            if (!existingEdge.sources.includes(result.tableName)) {
+              existingEdge.sources.push(result.tableName);
+            }
           } else {
-            edges.push({ source, target, weight: 1, type: 'co_occurrence' });
+            edges.push({
+              id: `${sourceId}-${targetId}`,
+              source: sourceId,
+              target: targetId,
+              relationship: 'co-occurrence',
+              weight: 1,
+              sources: [result.tableName],
+              strength: 'weak',
+              confidence: 0.5,
+            });
+          }
+
+          // Update node connections
+          const sourceNode = nodeMap.get(sourceId);
+          const targetNode = nodeMap.get(targetId);
+          if (sourceNode && !sourceNode.connections.includes(targetId)) {
+            sourceNode.connections.push(targetId);
+          }
+          if (targetNode && !targetNode.connections.includes(sourceId)) {
+            targetNode.connections.push(sourceId);
           }
         }
       }
+
+      clusters.set(result.id, entityIds);
     }
 
-    // Clusters
-    const clusters = this.identifyClusters(nodeMap, edges);
-
-    const nodes = Array.from(nodeMap.values()).sort((a, b) => b.count - a.count);
-    edges.sort((a, b) => b.weight - a.weight);
+    // Update edge strengths based on weight
+    for (const edge of edges) {
+      if (edge.weight >= 5) {
+        edge.strength = 'strong';
+        edge.confidence = 0.85;
+      } else if (edge.weight >= 2) {
+        edge.strength = 'moderate';
+        edge.confidence = 0.7;
+      }
+    }
 
     return { nodes, edges, clusters };
   }
 
-  private identifyClusters(
-    nodeMap: Map<string, CorrelationNode>,
-    edges: CorrelationEdge[]
-  ): CorrelationGraph['clusters'] {
-    const clusters: CorrelationGraph['clusters'] = [];
-    const visited = new Set<string>();
+  /**
+   * Run advanced V2 correlation analysis
+   */
+  private async runAdvancedAnalysis(graph: CorrelationGraph) {
+    // Convert to V2 graph format
+    const v2Nodes = graph.nodes.map(n => ({
+      id: n.id,
+      type: n.entityType as any,
+      label: n.label,
+      value: n.value,
+      aliases: [],
+      properties: {},
+      incomingEdges: [],
+      outgoingEdges: [],
+      sources: n.sources,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }));
 
-    for (const node of Array.from(nodeMap.values())) {
-      if (visited.has(node.id)) continue;
+    const v2Edges = graph.edges.map(e => ({
+      id: e.id,
+      source: e.source,
+      target: e.target,
+      type: 'co_occurrence' as const,
+      strength: (e.strength || 'weak') as any,
+      weight: e.weight,
+      properties: {},
+      evidence: [],
+      confidence: e.confidence || 0.5,
+      sources: e.sources,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }));
 
-      const clusterNodes = [node.id];
-      visited.add(node.id);
+    return this.correlationEngine.analyze(v2Nodes, v2Edges);
+  }
 
-      for (const connectedId of node.connections) {
-        const edge = edges.find(
-          e => (e.source === node.id && e.target === connectedId) ||
-               (e.target === node.id && e.source === connectedId)
-        );
+  /**
+   * Map entity type to graph node type
+   */
+  private mapEntityTypeToNodeType(entityType: string): CorrelationNode['type'] {
+    const mapping: Record<string, CorrelationNode['type']> = {
+      phone: 'phone',
+      email: 'email',
+      name: 'person',
+      address: 'address',
+      account_number: 'account',
+      pan_number: 'other',
+      aadhaar_number: 'other',
+      ifsc_code: 'other',
+      vehicle_number: 'other',
+      ip_address: 'other',
+      location: 'other',
+      company: 'other',
+      upi_id: 'other',
+      crypto_address: 'other',
+    };
+    return mapping[entityType] || 'other';
+  }
 
-        if (edge && edge.weight >= 2) {
-          clusterNodes.push(connectedId);
-          visited.add(connectedId);
+  /**
+   * Filter results based on LOW value entities and relationships
+   */
+  private filterResults(
+    results: SearchResult[],
+    filterEntities: Entity[],
+    relationships: EntityRelationship[]
+  ): SearchResult[] {
+    if (filterEntities.length === 0) {
+      return results;
+    }
+
+    return results.filter(result => {
+      const dataString = JSON.stringify(result.data).toLowerCase();
+
+      for (const filter of filterEntities) {
+        if (filter.type === 'name' || filter.type === 'location' || filter.type === 'company') {
+          if (dataString.includes(filter.value.toLowerCase())) {
+            return true;
+          }
         }
       }
 
-      if (clusterNodes.length > 1) {
-        const clusterNode = nodeMap.get(node.id)!;
-        clusters.push({
-          id: `cluster_${clusters.length}`,
-          nodes: clusterNodes,
-          label: `${clusterNode.type}: ${clusterNode.value}`,
-        });
-      }
-    }
-
-    return clusters;
+      return false;
+    });
   }
 
-  // =========================================================================
-  // STAGE 6: GENERATE INSIGHTS (Uses Ollama Client)
-  // =========================================================================
+  /**
+   * Generate insights from search results (V2 enhanced)
+   */
+  private generateInsights(
+    results: SearchResult[],
+    extraction: ExtractedEntities,
+    graph: CorrelationGraph | null,
+    v2Analysis?: any
+  ): SearchInsights {
+    const entityBreakdown: Record<string, number> = {};
+    const redFlags: string[] = [];
+    const patterns: string[] = [];
+    const recommendations: string[] = [];
 
-  async generateInsights(
-    query: ParsedQuery,
-    filteredResults: FilteredResult[],
-    correlationGraph: CorrelationGraph,
-    allResults?: PaginatedResult[]
-  ): Promise<RobustSearchResponse['insights']> {
-    this.updateProgress({
-      stage: 'analyzing',
-      message: 'Generating AI insights...',
-      progress: 90,
-      currentPage: 0,
-      totalResults: filteredResults.length,
-      hasMore: false,
-    });
+    // Count entities by type
+    for (const entity of extraction.entities) {
+      entityBreakdown[entity.type] = (entityBreakdown[entity.type] || 0) + 1;
+    }
 
-    const topMatches = filteredResults.slice(0, 10);
+    // Get top entities by occurrences
+    const topEntities = graph
+      ? graph.nodes
+          .sort((a, b) => b.occurrences - a.occurrences)
+          .slice(0, 10)
+          .map(n => ({
+            value: n.value,
+            type: n.entityType,
+            occurrences: n.occurrences,
+          }))
+      : [];
 
-    const entityConnections = correlationGraph.nodes.slice(0, 20).map(node => ({
-      entity: node.value,
-      type: node.type,
-      appearances: node.count,
-      tables: node.sources,
-    }));
-
-    const patterns = this.identifyPatterns(filteredResults, correlationGraph);
-
-    let summary = '';
-    let recommendations: string[] = [];
-    let confidence = 0.7;
-    let aiModel = 'fallback';
-    let localAIUsed = false;
-
-    // Try local AI first
-    try {
-      const isAvailable = await ollamaClient.isAvailable();
-      if (isAvailable) {
-        localAIUsed = true;
-        aiModel = process.env.OLLAMA_MODEL || 'qwen2.5:3b';
-
-        const aiResults = filteredResults.slice(0, 15).map(r => ({
-          table: r.table,
-          record: r.record,
-          matchScore: r.matchScore,
-        }));
-
-        const aiInsights = await ollamaClient.generateInsights(query.originalQuery, aiResults);
-
-        summary = aiInsights.summary;
-        recommendations = aiInsights.recommendations;
-        confidence = aiInsights.confidence;
+    // V2 enhanced insights
+    if (v2Analysis) {
+      // Add V2 patterns
+      for (const pattern of v2Analysis.patterns.slice(0, 3)) {
+        patterns.push(pattern.description);
       }
-    } catch (error) {
-      logger.warn('Local AI failed, using fallback', error);
+
+      // Add V2 anomalies as red flags
+      for (const anomaly of v2Analysis.anomalies.slice(0, 3)) {
+        redFlags.push(anomaly.description);
+      }
+
+      // Add V2 risk indicators
+      for (const risk of v2Analysis.riskIndicators.slice(0, 3)) {
+        redFlags.push(`[${risk.severity.toUpperCase()}] ${risk.description}`);
+      }
+
+      // Add V2 insights as recommendations
+      for (const insight of v2Analysis.insights.slice(0, 3)) {
+        if (insight.actionable) {
+          recommendations.push(insight.description);
+        }
+      }
     }
 
-    // Fallback
-    if (!summary) {
-      summary = filteredResults.length === 0
-        ? `No results found for "${query.originalQuery}".`
-        : `Found ${filteredResults.length} results for "${query.originalQuery}". ` +
-          `Discovered ${correlationGraph.nodes.length} entities with ${correlationGraph.edges.length} connections.`;
+    // Original insights
+    if (graph) {
+      const highConnectionNodes = graph.nodes.filter(n => n.connections.length > 5);
+      if (highConnectionNodes.length > 0) {
+        redFlags.push(`${highConnectionNodes.length} entities with unusually high connections detected`);
+      }
+
+      const crossTableEntities = graph.nodes.filter(n => n.sources.length > 2);
+      if (crossTableEntities.length > 0) {
+        redFlags.push(`${crossTableEntities.length} entities found across multiple data sources`);
+      }
     }
 
-    if (recommendations.length < 2) {
-      const basicRecs = this.generateRecommendations(query, filteredResults, correlationGraph);
-      recommendations = [...recommendations, ...basicRecs].slice(0, 5);
+    if (extraction.highValue.length > 0) {
+      patterns.push(`Search initiated with ${extraction.highValue.length} unique identifier(s)`);
+    }
+
+    if (results.length > 10) {
+      patterns.push(`Large result set (${results.length} records) indicates potential data correlation`);
+    }
+
+    if (topEntities.length > 0) {
+      recommendations.push(`Investigate ${topEntities[0].value} - highest occurrence entity`);
+    }
+
+    if (graph && graph.nodes.length > 20) {
+      recommendations.push('Consider narrowing search criteria for more focused results');
+    }
+
+    if (redFlags.length > 0) {
+      recommendations.push('Review red flags for potential anomalies');
     }
 
     return {
-      summary,
-      topMatches,
-      entityConnections,
-      patterns,
-      recommendations,
-      confidence,
-      aiModel,
-      localAIUsed,
+      highValueMatches: extraction.highValue.length,
+      totalConnections: graph?.edges.length || 0,
+      entityBreakdown,
+      topEntities,
+      redFlags: [...new Set(redFlags)],
+      patterns: [...new Set(patterns)],
+      recommendations: [...new Set(recommendations)],
     };
   }
-
-  private identifyPatterns(results: FilteredResult[], graph: CorrelationGraph): string[] {
-    const patterns: string[] = [];
-
-    const topEntities = graph.nodes.slice(0, 5);
-    for (const entity of topEntities) {
-      if (entity.count >= 3) {
-        patterns.push(`"${entity.value}" appears ${entity.count} times`);
-      }
-    }
-
-    const strongEdges = graph.edges.filter(e => e.weight >= 3).slice(0, 5);
-    for (const edge of strongEdges) {
-      const sourceNode = graph.nodes.find(n => n.id === edge.source);
-      const targetNode = graph.nodes.find(n => n.id === edge.target);
-      if (sourceNode && targetNode) {
-        patterns.push(`Strong link: "${sourceNode.value}" ↔ "${targetNode.value}"`);
-      }
-    }
-
-    return patterns;
-  }
-
-  private generateRecommendations(
-    query: ParsedQuery,
-    results: FilteredResult[],
-    graph: CorrelationGraph
-  ): string[] {
-    const recommendations: string[] = [];
-
-    if (results.length === 0) {
-      recommendations.push('Try broadening your search criteria');
-    } else if (results.length > 100) {
-      recommendations.push('Many results - consider adding more specific filters');
-    }
-
-    if (graph.clusters.length > 0) {
-      recommendations.push(`Found ${graph.clusters.length} entity clusters to investigate`);
-    }
-
-    const highValueCount = this.allDiscoveredEntities.filter(e => 
-      ['phone', 'email', 'id_number'].includes(e.type)
-    ).length;
-
-    if (highValueCount > 1) {
-      recommendations.push(`${highValueCount} unique identifiers discovered - explore connections`);
-    }
-
-    return recommendations;
-  }
-
-  // =========================================================================
-  // MAIN ENTRY POINT
-  // =========================================================================
-
-  async search(query: string): Promise<RobustSearchResponse> {
-    const startTime = Date.now();
-    this.cursorsUsed = [];
-    this.apiCalls = 0;
-    this.earlyStopped = false;
-
-    try {
-      // Stage 1: Parse query
-      const parsedQuery = await this.parseQuery(query);
-
-      // Stage 2: Execute iterative search
-      const allResults = await this.executeIterativeSearch(parsedQuery);
-
-      // Stage 3: Filter and deduplicate
-      const { filtered, duplicatesRemoved } = await this.filterAndDeduplicate(
-        allResults.map(r => ({ ...r, pageNumber: r.pageNumber || 1 })),
-        parsedQuery.secondaryCriteria
-      );
-
-      // Stage 4: Build correlation graph
-      const correlationGraph = this.buildCorrelationGraph(filtered);
-
-      // Stage 5: Generate insights
-      const insights = await this.generateInsights(parsedQuery, filtered, correlationGraph, allResults);
-
-      // Complete
-      this.updateProgress({
-        stage: 'complete',
-        message: `Search complete! Found ${filtered.length} results.`,
-        progress: 100,
-        currentPage: 0,
-        totalResults: filtered.length,
-        hasMore: false,
-      });
-
-      const highValueEntities = this.allDiscoveredEntities.length;
-      const lowValueEntities = parsedQuery.secondaryCriteria.length;
-
-      return {
-        success: true,
-        query: parsedQuery,
-        allFetchedResults: allResults,
-        totalFetched: allResults.length,
-        totalPages: this.cursorsUsed.length + 1,
-        filteredResults: filtered,
-        totalFiltered: filtered.length,
-        duplicatesRemoved,
-        correlationGraph,
-        insights,
-        metadata: {
-          duration: Date.now() - startTime,
-          apiCalls: this.apiCalls,
-          cursorsUsed: this.cursorsUsed,
-          primarySearchTerm: parsedQuery.primaryCriteria[0]?.normalizedValue || query,
-          filtersApplied: parsedQuery.secondaryCriteria.map(c => c.description),
-          hasMoreData: !this.earlyStopped,
-          earlyStopped: this.earlyStopped,
-          iterations: Math.min(this.allDiscoveredEntities.length > 0 ? CONFIG.maxIterations : 1, CONFIG.maxIterations),
-          discoveredEntities: highValueEntities,
-          discoveredEntityList: this.allDiscoveredEntities.slice(0, 10).map(e => e.value),
-          highValueEntities,
-          lowValueEntities,
-        },
-      };
-
-    } catch (error) {
-      logger.error('Search failed', error);
-
-      return {
-        success: false,
-        query: {
-          originalQuery: query,
-          primaryCriteria: [],
-          secondaryCriteria: [],
-          intent: 'Unknown',
-        },
-        allFetchedResults: [],
-        totalFetched: 0,
-        totalPages: 0,
-        filteredResults: [],
-        totalFiltered: 0,
-        duplicatesRemoved: 0,
-        correlationGraph: { nodes: [], edges: [], clusters: [] },
-        insights: {
-          summary: `Search failed: ${(error as Error).message}`,
-          topMatches: [],
-          entityConnections: [],
-          patterns: [],
-          recommendations: ['Try a different search query'],
-          confidence: 0,
-          aiModel: 'none',
-          localAIUsed: false,
-        },
-        metadata: {
-          duration: Date.now() - startTime,
-          apiCalls: this.apiCalls,
-          cursorsUsed: this.cursorsUsed,
-          primarySearchTerm: query,
-          filtersApplied: [],
-          hasMoreData: false,
-          earlyStopped: false,
-          iterations: 0,
-          discoveredEntities: 0,
-          discoveredEntityList: [],
-          highValueEntities: 0,
-          lowValueEntities: 0,
-        },
-      };
-    }
-  }
 }
 
-// Factory function
-export function createRobustSearch(
-  options?: {
-    progressCallback?: (progress: ProgressUpdate) => void;
-    apiBaseUrl?: string;
-    bearerToken?: string;
-  }
-): RobustAgentSearchEngine {
-  return new RobustAgentSearchEngine(options);
-}
+// Export singleton instance
+export const robustAgentSearch = new RobustAgentSearch();

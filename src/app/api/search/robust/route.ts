@@ -16,7 +16,6 @@ interface SearchRequest {
   query: string;
   apiBaseUrl?: string;
   bearerToken?: string;
-  apiKey?: string;
   options?: {
     maxIterations?: number;
     maxResultsPerEntity?: number;
@@ -56,7 +55,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const body: SearchRequest = await request.json();
-    const { query, apiBaseUrl = 'http://localhost:5000', bearerToken, apiKey, options = {} } = body;
+    const { query, apiBaseUrl = 'http://localhost:8080', bearerToken, options = {} } = body;
 
     if (!query || typeof query !== 'string') {
       return NextResponse.json(
@@ -92,22 +91,14 @@ export async function POST(request: NextRequest) {
       'pk',
     ]);
 
-    // Create axios instance for backend API with auth support
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
-    
-    // Support both API Key and Bearer Token authentication
-    if (apiKey) {
-      headers['X-API-Key'] = apiKey;
-    } else if (bearerToken) {
-      headers['Authorization'] = `Bearer ${bearerToken}`;
-    }
-
+    // Create axios instance for backend API
     const apiClient = axios.create({
       baseURL: apiBaseUrl,
       timeout: 60000,
-      headers,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(bearerToken ? { 'Authorization': `Bearer ${bearerToken}` } : {}),
+      },
     });
 
     // Step 1: Extract entities from query using regex

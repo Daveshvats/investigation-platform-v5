@@ -9,31 +9,31 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Progress } from '@/components/ui/progress';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Switch } from '@/components/ui/switch';
+import { Label } from '@/components/ui/label';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { 
   Search, 
   Network, 
-  Database, 
   RefreshCw,
   AlertCircle,
   ChevronDown,
   ChevronUp,
   Target,
-  Clock,
-  CheckCircle2,
-  XCircle,
-  Filter,
   Download,
-  Zap,
-  Users,
-  GitBranch,
-  Activity,
-  Layers,
   Sparkles,
+  Shield,
+  Table,
+  Loader2,
+  Maximize2,
+  X,
   FileText,
 } from 'lucide-react';
 import { useSettingsStore } from '@/store/settings';
-import type { RobustSearchResponse, FilteredResult } from '@/lib/robust-agent-search';
 import { CorrelationGraphView } from './correlation-graph-view';
+import { InsightsPanel } from './insights-panel';
+import { toast } from 'sonner';
+import { addActivity } from '@/components/dashboard/user-activity-card';
 
 interface ProgressUpdate {
   stage: string;
@@ -42,19 +42,70 @@ interface ProgressUpdate {
   currentPage: number;
   totalResults: number;
   hasMore: boolean;
-  iteration?: number;
-  discoveredEntities?: string[];
+}
+
+interface Entity {
+  type: string;
+  value: string;
+  originalText: string;
+  priority: 'HIGH' | 'MEDIUM' | 'LOW';
+  confidence: number;
+}
+
+interface FilteredResult {
+  table: string;
+  record: Record<string, unknown>;
+  matchedFields: string[];
+  matchedEntities: string[];
+  score: number;
+}
+
+interface RobustSearchResponse {
+  success: boolean;
+  query: string;
+  extraction: {
+    entities: Entity[];
+    highValue: Entity[];
+    mediumValue: Entity[];
+    lowValue: Entity[];
+    relationships: any[];
+    extractionTime?: number;
+  };
+  filteredResults: FilteredResult[];
+  results: FilteredResult[];
+  correlationGraph: {
+    nodes: any[];
+    edges: any[];
+  } | null;
+  insights: any;
+  v2Insights?: {
+    patterns: number;
+    anomalies: number;
+    riskIndicators: number;
+  };
+  metadata: {
+    searchTime: number;
+    entitiesSearched: number;
+    iterationsPerformed: number;
+    totalRecordsSearched: number;
+    apiCalls?: number;
+    totalFetched?: number;
+    v2Enabled: boolean;
+  };
 }
 
 export function RobustSearchView() {
-  const { baseUrl, bearerToken } = useSettingsStore();
+  const { baseUrl, authType, authToken, bearerToken } = useSettingsStore();
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
   const [progress, setProgress] = useState<ProgressUpdate | null>(null);
   const [results, setResults] = useState<RobustSearchResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [expandedRecords, setExpandedRecords] = useState<Set<string>>(new Set());
-  const [selectedTable, setSelectedTable] = useState<string>('all');
+  const [activeTab, setActiveTab] = useState('results');
+  const [v2Enabled, setV2Enabled] = useState(true);
+  const [graphModalOpen, setGraphModalOpen] = useState(false);
+  const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const runSearch = useCallback(async () => {
@@ -79,12 +130,9 @@ export function RobustSearchView() {
       setProgress(prev => {
         if (!prev) return null;
         
-        // Cycle through stages
-        const stages = ['parsing', 'searching', 'paginating', 'iterating', 'filtering', 'analyzing'];
+        const stages = ['parsing', 'searching', 'discovering', 'iterating', 'filtering', 'analyzing'];
         const currentIndex = stages.indexOf(prev.stage);
         const nextIndex = Math.min(currentIndex + 1, stages.length - 1);
-        
-        // Increase progress gradually
         const progressIncrement = Math.random() * 5 + 2;
         const newProgress = Math.min(prev.progress + progressIncrement, 90);
         
@@ -106,13 +154,26 @@ export function RobustSearchView() {
     }, 300);
 
     try {
-      const response = await fetch('/api/robust-search', {
+      // Use authToken if available, otherwise fall back to bearerToken
+      const token = authToken || bearerToken;
+      
+      const response = await fetch('/api/search/robust', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           query: searchQuery,
           apiBaseUrl: baseUrl,
-          bearerToken: bearerToken || undefined,
+          // Send both bearerToken and apiKey based on authType
+          bearerToken: authType === 'bearer' ? token : undefined,
+          apiKey: authType === 'api-key' ? token : undefined,
+          options: {
+            maxIterations: 5,
+            maxResultsPerEntity: 100,
+            includeGraph: true,
+            generateReport: false,
+            enableV2: v2Enabled,
+            analyzeCorrelations: v2Enabled,
+          },
         }),
         signal: abortControllerRef.current.signal,
       });
@@ -125,11 +186,16 @@ export function RobustSearchView() {
           stage: 'complete',
           message: 'Search complete!',
           progress: 100,
-          currentPage: data.metadata.apiCalls,
-          totalResults: data.totalFetched,
+          currentPage: data.metadata?.apiCalls || 0,
+          totalResults: data.filteredResults?.length || 0,
           hasMore: false,
         });
         setResults(data);
+        // Track activity for Deep Search
+        addActivity({
+          type: 'search',
+          description: `Deep Search: "${searchQuery}" (${data.filteredResults?.length || 0} results)`,
+        });
       } else {
         setError(data.error || 'Search failed');
       }
@@ -144,7 +210,7 @@ export function RobustSearchView() {
       setIsSearching(false);
       abortControllerRef.current = null;
     }
-  }, [searchQuery, baseUrl, bearerToken]);
+  }, [searchQuery, baseUrl, authType, authToken, bearerToken, v2Enabled]);
 
   const cancelSearch = useCallback(() => {
     if (abortControllerRef.current) {
@@ -155,532 +221,433 @@ export function RobustSearchView() {
   const toggleRecord = (id: string) => {
     setExpandedRecords(prev => {
       const newSet = new Set(prev);
-      newSet.has(id) ? newSet.delete(id) : newSet.add(id);
+      if (newSet.has(id)) {
+        newSet.delete(id);
+      } else {
+        newSet.add(id);
+      }
       return newSet;
     });
   };
 
-  // Get unique tables
-  const tables = results?.filteredResults 
-    ? [...new Set(results.filteredResults.map(r => r.table))]
-    : [];
-
-  // Filter results by table
-  const displayResults = results?.filteredResults
-    ? selectedTable === 'all' 
-      ? results.filteredResults 
-      : results.filteredResults.filter(r => r.table === selectedTable)
-    : [];
-
-  // Export to CSV
   const handleExportCSV = useCallback(async () => {
-    if (!results) return;
+    if (!results?.filteredResults) return;
 
-    try {
-      const response = await fetch('/api/export/csv', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          results: results.filteredResults,
-          query: results.query.originalQuery,
-        }),
-      });
+    const allRecords = results.filteredResults.map(r => ({
+      ...r.record,
+      _table: r.table,
+      _matchedFields: r.matchedFields.join(', '),
+      _score: r.score,
+    }));
 
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `investigation_${Date.now()}.csv`;
-      a.click();
-      window.URL.revokeObjectURL(url);
-    } catch (err) {
-      console.error('Export failed:', err);
+    if (allRecords.length === 0) {
+      toast.error('No records to export');
+      return;
     }
+
+    const headers = Array.from(
+      new Set(allRecords.flatMap(r => Object.keys(r)))
+    );
+    const csvRows = [
+      headers.join(','),
+      ...allRecords.map(record =>
+        headers.map(h => {
+          const val = (record as any)[h];
+          if (val === null || val === undefined) return '';
+          const str = String(val);
+          return str.includes(',') ? `"${str}"` : str;
+        }).join(',')
+      ),
+    ];
+
+    const blob = new Blob([csvRows.join('\n')], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `investigation_${Date.now()}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast.success('Exported to CSV');
+    addActivity({ type: 'export', description: 'Exported Deep Search results to CSV' });
   }, [results]);
 
-  // Export to PDF
-  const [isExportingPDF, setIsExportingPDF] = useState(false);
-  
   const handleExportPDF = useCallback(async () => {
-    if (!results) return;
+    if (!results || !results.filteredResults || results.filteredResults.length === 0) {
+      toast.error('No results to export');
+      return;
+    }
     
-    setIsExportingPDF(true);
+    setIsGeneratingPdf(true);
+    toast.info('Generating PDF report...');
+    
     try {
-      const response = await fetch('/api/export/pdf', {
+      const payload = {
+        query: results.query,
+        extraction: results.extraction,
+        results: results.filteredResults,
+        correlationGraph: results.correlationGraph,
+        insights: results.insights,
+        metadata: results.metadata,
+      };
+      
+      console.log('Sending PDF request with payload:', {
+        query: payload.query,
+        resultsCount: payload.results?.length,
+        hasExtraction: !!payload.extraction,
+      });
+      
+      const response = await fetch('/api/report/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          query: results.query.originalQuery,
-          results: results.filteredResults,
-          graph: results.correlationGraph,
-          insights: results.insights,
-          metadata: results.metadata,
-        }),
+        body: JSON.stringify(payload),
       });
-
+      
       if (!response.ok) {
-        throw new Error('Failed to generate PDF');
+        const errorData = await response.json().catch(() => ({}));
+        console.error('PDF generation failed:', errorData);
+        throw new Error(errorData.error || 'Failed to generate PDF');
       }
-
+      
       const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
+      const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
       a.download = `investigation_report_${Date.now()}.pdf`;
       a.click();
-      window.URL.revokeObjectURL(url);
-    } catch (err) {
-      console.error('PDF export failed:', err);
+      URL.revokeObjectURL(url);
+      
+      toast.success('PDF report generated successfully!');
+      addActivity({ type: 'export', description: 'Exported Deep Search results to PDF' });
+    } catch (error) {
+      console.error('PDF generation error:', error);
+      toast.error(error instanceof Error ? error.message : 'Failed to generate PDF report');
     } finally {
-      setIsExportingPDF(false);
+      setIsGeneratingPdf(false);
     }
   }, [results]);
 
+  // Example queries
+  const exampleQueries = [
+    'find subodh from delhi having phone 9748247177',
+    'rahul sharma connected to aman verma',
+    'phone 9876543210 in mumbai',
+    'PAN ABCDE1234F transactions',
+  ];
+
   return (
-    <div className="flex flex-col h-full">
+    <div className="space-y-6">
       {/* Header */}
-      <div className="p-4 border-b bg-background">
-        <div className="flex items-center gap-3 mb-3">
-          <Network className="h-5 w-5 text-blue-500" />
-          <h2 className="text-lg font-semibold">Robust Agent Search</h2>
-          <Badge variant="secondary" className="text-xs">
-            <Layers className="h-3 w-3 mr-1" />
-            Iterative Discovery
-          </Badge>
-        </div>
-
-        <div className="flex gap-2">
-          <Input
-            placeholder="rahul sharma from delhi having no. 9876543210"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && runSearch()}
-            className="flex-1"
-            disabled={isSearching}
-          />
-          {isSearching ? (
-            <Button variant="destructive" onClick={cancelSearch}>
-              Cancel
-            </Button>
-          ) : (
-            <Button onClick={runSearch} disabled={!searchQuery.trim()}>
-              <Network className="mr-2 h-4 w-4" />Search
-            </Button>
-          )}
-        </div>
-
-        {/* Real-time Progress */}
-        {isSearching && progress && (
-          <div className="mt-3 space-y-2">
-            <div className="flex items-center justify-between text-sm">
-              <span className="flex items-center gap-2">
-                <RefreshCw className="h-4 w-4 animate-spin text-blue-500" />
-                {progress.message}
-              </span>
-              <span className="text-muted-foreground">{Math.round(progress.progress)}%</span>
-            </div>
-            <Progress value={progress.progress} className="h-2" />
-            <div className="flex gap-4 text-xs text-muted-foreground">
-              <span><Database className="inline h-3 w-3 mr-1" />{progress.totalResults} results</span>
-              <span><Layers className="inline h-3 w-3 mr-1" />Page {progress.currentPage}</span>
-              {progress.iteration && (
-                <span className="text-purple-500">
-                  <GitBranch className="inline h-3 w-3 mr-1" />Iteration {progress.iteration}
-                </span>
+      <div className="space-y-1">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-2xl font-bold tracking-tight flex items-center gap-2">
+              <Network className="h-6 w-6" />
+              Deep Search
+              {v2Enabled && (
+                <Badge variant="default" className="ml-2 bg-gradient-to-r from-blue-600 to-purple-600">
+                  <Sparkles className="h-3 w-3 mr-1" />
+                  V2 Enhanced
+                </Badge>
               )}
-            </div>
-            {progress.discoveredEntities && progress.discoveredEntities.length > 0 && (
-              <div className="flex flex-wrap gap-1">
-                <span className="text-xs text-muted-foreground">Discovered:</span>
-                {progress.discoveredEntities.slice(0, 5).map((entity, i) => (
-                  <Badge key={i} variant="outline" className="text-[10px]">{entity}</Badge>
-                ))}
-              </div>
-            )}
+            </h2>
+            <p className="text-muted-foreground">
+              {v2Enabled 
+                ? '2026-standard: Hybrid NER, Knowledge Graph, Pattern Detection, Risk Analysis'
+                : 'Full pagination, correlation graph, and intelligent filtering'
+              }
+            </p>
           </div>
-        )}
-
-        <div className="mt-2 text-xs text-muted-foreground">
-          Searches phone/email first, uses full pagination, discovers new identifiers iteratively
+          
+          {/* V2 Toggle */}
+          <div className="flex items-center space-x-2">
+            <Switch
+              id="v2-mode"
+              checked={v2Enabled}
+              onCheckedChange={setV2Enabled}
+            />
+            <Label htmlFor="v2-mode" className="text-sm">
+              <div className="flex items-center gap-1">
+                <Shield className="h-3 w-3" />
+                V2 Engine
+              </div>
+            </Label>
+          </div>
         </div>
       </div>
+
+      {/* Search Card */}
+      <Card>
+        <CardContent className="pt-6">
+          <div className="flex gap-2">
+            <Input
+              placeholder="e.g., find subodh from delhi having phone 9748247177"
+              className="flex-1 h-12"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && !isSearching && runSearch()}
+              disabled={isSearching}
+            />
+            {isSearching ? (
+              <Button variant="destructive" className="h-12 px-6" onClick={cancelSearch}>
+                Cancel
+              </Button>
+            ) : (
+              <Button className="h-12 px-6" onClick={runSearch} disabled={!searchQuery.trim()}>
+                <Search className="mr-2 h-4 w-4" />
+                Search
+              </Button>
+            )}
+          </div>
+
+          {/* Example queries */}
+          <div className="flex flex-wrap gap-2 mt-3">
+            <span className="text-sm text-muted-foreground">Try:</span>
+            {exampleQueries.map((q, i) => (
+              <Button
+                key={i}
+                variant="ghost"
+                size="sm"
+                className="text-xs h-7"
+                onClick={() => setSearchQuery(q)}
+              >
+                {q}
+              </Button>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Progress */}
+      {isSearching && progress && (
+        <Card className="border-blue-200 bg-blue-50 dark:bg-blue-950/20">
+          <CardContent className="py-3">
+            <div className="flex items-center gap-3">
+              <Loader2 className="h-4 w-4 animate-spin text-blue-600" />
+              <div className="flex-1">
+                <p className="text-sm font-medium text-blue-900 dark:text-blue-100">{progress.message}</p>
+                <Progress value={progress.progress} className="h-1 mt-1" />
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Error */}
       {error && (
-        <div className="p-4">
-          <Alert variant="destructive">
-            <AlertCircle className="h-4 w-4" />
-            <AlertTitle>Error</AlertTitle>
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        </div>
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Error</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
       )}
 
-      {/* Results */}
-      <ScrollArea className="flex-1 p-4">
-        {!results ? (
-          <Card>
-            <CardContent className="flex flex-col items-center justify-center py-16">
-              <Network className="h-16 w-16 text-muted-foreground mb-4" />
-              <h3 className="text-lg font-semibold mb-2">Robust Iterative Search</h3>
-              <p className="text-sm text-muted-foreground text-center max-w-md mb-4">
-                Comprehensive search with entity discovery and relationship mapping
-              </p>
-              <div className="space-y-2 text-sm max-w-md">
-                <div className="p-2 bg-green-50 dark:bg-green-950/20 rounded flex items-center gap-2">
-                  <span className="text-green-600 font-medium">1.</span>
-                  <span>Extract identifiers (phone, email, ID, name, location)</span>
-                </div>
-                <div className="p-2 bg-blue-50 dark:bg-blue-950/20 rounded flex items-center gap-2">
-                  <span className="text-blue-600 font-medium">2.</span>
-                  <span>Search with full pagination (all results)</span>
-                </div>
-                <div className="p-2 bg-purple-50 dark:bg-purple-950/20 rounded flex items-center gap-2">
-                  <span className="text-purple-600 font-medium">3.</span>
-                  <span>Discover new identifiers from results</span>
-                </div>
-                <div className="p-2 bg-orange-50 dark:bg-orange-950/20 rounded flex items-center gap-2">
-                  <span className="text-orange-600 font-medium">4.</span>
-                  <span>Build correlation graph & generate insights</span>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        ) : (
-          <div className="space-y-4">
-            {/* Summary Card */}
-            <Card className="bg-primary/5">
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm flex items-center gap-2">
-                  <Activity className="h-4 w-4 text-green-500" />
-                  Investigation Summary
-                  {results.query.aiEntityExtraction && (
-                    <Badge variant="default" className="ml-2 bg-purple-500 text-white">
-                      <Sparkles className="h-3 w-3 mr-1" />
-                      AI Enhanced
-                    </Badge>
-                  )}
-                  {results.insights.localAIUsed && (
-                    <Badge variant="outline" className="ml-1 text-purple-600 border-purple-300">
-                      AI Insights: {results.insights.aiModel}
-                    </Badge>
-                  )}
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-sm mb-3">{results.insights.summary}</p>
-                
-                {/* Stats Grid */}
-                <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-3">
-                  <div className="p-2 bg-background rounded border">
-                    <div className="text-xs text-muted-foreground">Total Fetched</div>
-                    <div className="text-lg font-bold">{results.totalFetched.toLocaleString()}</div>
-                  </div>
-                  <div className="p-2 bg-background rounded border">
-                    <div className="text-xs text-muted-foreground">Results</div>
-                    <div className="text-lg font-bold text-green-600">{results.totalFiltered.toLocaleString()}</div>
-                  </div>
-                  <div className="p-2 bg-background rounded border">
-                    <div className="text-xs text-muted-foreground">API Calls</div>
-                    <div className="text-lg font-bold">{results.metadata.apiCalls}</div>
-                  </div>
-                  <div className="p-2 bg-background rounded border">
-                    <div className="text-xs text-muted-foreground">Duration</div>
-                    <div className="text-lg font-bold">{(results.metadata.duration / 1000).toFixed(1)}s</div>
-                  </div>
-                  <div className="p-2 bg-background rounded border">
-                    <div className="text-xs text-muted-foreground">Iterations</div>
-                    <div className="text-lg font-bold text-purple-600">{results.metadata.iterations}</div>
-                  </div>
-                  <div className="p-2 bg-background rounded border">
-                    <div className="text-xs text-muted-foreground">Duplicates</div>
-                    <div className="text-lg font-bold text-orange-600">{results.duplicatesRemoved}</div>
-                  </div>
-                </div>
-
-                {/* Discovered Entities */}
-                {results.metadata.discoveredEntityList && results.metadata.discoveredEntityList.length > 0 && (
-                  <div className="mb-3">
-                    <div className="text-xs text-muted-foreground mb-1">
-                      Discovered Entities ({results.metadata.discoveredEntities}):
-                    </div>
-                    <div className="flex flex-wrap gap-1">
-                      {results.metadata.discoveredEntityList.slice(0, 10).map((entity, i) => (
-                        <Badge key={i} variant="outline" className="text-[10px]">{entity}</Badge>
-                      ))}
-                      {results.metadata.discoveredEntityList.length > 10 && (
-                        <Badge variant="secondary" className="text-[10px]">
-                          +{results.metadata.discoveredEntityList.length - 10} more
-                        </Badge>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {/* Search Details */}
-                <div className="flex flex-wrap gap-2 text-xs">
-                  <Badge variant="default">
-                    <Search className="h-3 w-3 mr-1" />
-                    {results.metadata.primarySearchTerm}
+      {/* Extracted Entities Summary */}
+      {results?.extraction?.entities && results.extraction.entities.length > 0 && (
+        <Card className="border-green-200 bg-green-50 dark:bg-green-950/20">
+          <CardContent className="py-3">
+            <div className="flex flex-wrap items-center gap-4">
+              <span className="text-sm font-medium text-green-900 dark:text-green-100">Extracted Entities:</span>
+              {results.extraction.entities.filter((e: Entity) => e.priority === 'HIGH').length > 0 && (
+                <div className="flex items-center gap-1">
+                  <Badge variant="default" className="bg-red-500">
+                    HIGH: {results.extraction.entities.filter((e: Entity) => e.priority === 'HIGH').length}
                   </Badge>
-                  {results.metadata.filtersApplied.map((f, i) => (
-                    <Badge key={i} variant="secondary">
-                      <Filter className="h-3 w-3 mr-1" />
-                      {f}
+                  <span className="text-xs text-green-800 dark:text-green-200">
+                    ({results.extraction.entities.filter((e: Entity) => e.priority === 'HIGH').map((e: Entity) => e.value).join(', ')})
+                  </span>
+                </div>
+              )}
+              {results.extraction.entities.filter((e: Entity) => e.priority === 'MEDIUM').length > 0 && (
+                <Badge variant="secondary">
+                  MEDIUM: {results.extraction.entities.filter((e: Entity) => e.priority === 'MEDIUM').length}
+                </Badge>
+              )}
+              {results.extraction.entities.filter((e: Entity) => e.priority === 'LOW').length > 0 && (
+                <Badge variant="outline">
+                  LOW: {results.extraction.entities.filter((e: Entity) => e.priority === 'LOW').length}
+                </Badge>
+              )}
+              
+              {/* V2 Insights Badge */}
+              {results.v2Insights && v2Enabled && (
+                <div className="flex items-center gap-2 ml-auto">
+                  <Badge variant="outline" className="border-blue-400 text-blue-700">
+                    <Sparkles className="h-3 w-3 mr-1" />
+                    {results.v2Insights.patterns} patterns
+                  </Badge>
+                  {results.v2Insights.anomalies > 0 && (
+                    <Badge variant="outline" className="border-orange-400 text-orange-700">
+                      {results.v2Insights.anomalies} anomalies
                     </Badge>
-                  ))}
-                  {results.metadata.earlyStopped && (
-                    <Badge variant="destructive">Limit Reached</Badge>
+                  )}
+                  {results.v2Insights.riskIndicators > 0 && (
+                    <Badge variant="outline" className="border-red-400 text-red-700">
+                      {results.v2Insights.riskIndicators} risks
+                    </Badge>
                   )}
                 </div>
-              </CardContent>
-            </Card>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
-            {/* Tabs for Results/Graph/Insights */}
-            <Tabs defaultValue="results" className="w-full">
-              <TabsList className="grid w-full grid-cols-3">
-                <TabsTrigger value="results">
-                  <Database className="h-4 w-4 mr-2" />
-                  Results ({results.totalFiltered})
+      {/* Results Section */}
+      {results && results.filteredResults && results.filteredResults.length > 0 && (
+        <div className="space-y-4">
+          <Tabs value={activeTab} onValueChange={setActiveTab}>
+            <div className="flex items-center justify-between">
+              <TabsList>
+                <TabsTrigger value="results" className="flex items-center gap-1">
+                  <Table className="h-4 w-4" />
+                  Results ({results.filteredResults.length})
                 </TabsTrigger>
-                <TabsTrigger value="graph">
-                  <GitBranch className="h-4 w-4 mr-2" />
-                  Correlations ({results.correlationGraph.nodes.length})
-                </TabsTrigger>
-                <TabsTrigger value="insights">
-                  <Zap className="h-4 w-4 mr-2" />
+                <TabsTrigger value="insights" className="flex items-center gap-1">
+                  <Target className="h-4 w-4" />
                   Insights
+                  {v2Enabled && results.v2Insights && (
+                    <Badge variant="secondary" className="ml-1 text-xs">V2</Badge>
+                  )}
                 </TabsTrigger>
               </TabsList>
 
-              {/* Results Tab */}
-              <TabsContent value="results" className="space-y-3">
-                {/* Table Filter */}
-                {tables.length > 1 && (
-                  <div className="flex gap-2 flex-wrap">
-                    <Button
-                      variant={selectedTable === 'all' ? 'default' : 'outline'}
-                      size="sm"
-                      onClick={() => setSelectedTable('all')}
-                    >
-                      All Tables
+              <div className="flex gap-2">
+                {/* Graph Modal Button */}
+                <Dialog open={graphModalOpen} onOpenChange={setGraphModalOpen}>
+                  <DialogTrigger asChild>
+                    <Button variant="outline" disabled={!results.correlationGraph?.nodes?.length}>
+                      <Network className="mr-2 h-4 w-4" />
+                      View Graph
+                      <Badge variant="secondary" className="ml-2">
+                        {results.correlationGraph?.nodes?.length || 0} nodes
+                      </Badge>
                     </Button>
-                    {tables.map(table => (
-                      <Button
-                        key={table}
-                        variant={selectedTable === table ? 'default' : 'outline'}
-                        size="sm"
-                        onClick={() => setSelectedTable(table)}
+                  </DialogTrigger>
+                  <DialogContent className="max-w-[95vw] max-h-[95vh] h-[90vh] p-0">
+                    <div className="absolute top-4 right-4 z-50">
+                      <Button 
+                        variant="secondary" 
+                        size="icon"
+                        onClick={() => setGraphModalOpen(false)}
                       >
-                        {table}
+                        <X className="h-4 w-4" />
                       </Button>
-                    ))}
-                  </div>
-                )}
-
-                {/* Export Buttons */}
-                <div className="flex justify-end gap-2">
-                  <Button variant="outline" size="sm" onClick={handleExportCSV}>
-                    <Download className="h-4 w-4 mr-2" />
-                    CSV
-                  </Button>
-                  <Button 
-                    variant="default" 
-                    size="sm" 
-                    onClick={handleExportPDF}
-                    disabled={isExportingPDF}
-                  >
-                    {isExportingPDF ? (
-                      <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
-                    ) : (
-                      <FileText className="h-4 w-4 mr-2" />
-                    )}
-                    Export PDF Report
-                  </Button>
-                </div>
-
-                {/* Results List */}
-                {displayResults.length === 0 ? (
-                  <div className="text-center py-8 text-muted-foreground">
-                    <XCircle className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                    <p>No results match the filter criteria</p>
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    {displayResults.slice(0, 50).map((result) => (
-                      <ResultCard 
-                        key={result.id} 
-                        result={result} 
-                        isExpanded={expandedRecords.has(result.id)}
-                        onToggle={() => toggleRecord(result.id)}
-                      />
-                    ))}
-                    {displayResults.length > 50 && (
-                      <p className="text-center text-sm text-muted-foreground py-2">
-                        Showing 50 of {displayResults.length} results
-                      </p>
-                    )}
-                  </div>
-                )}
-              </TabsContent>
-
-              {/* Graph Tab */}
-              <TabsContent value="graph">
-                <CorrelationGraphView 
-                  graph={results.correlationGraph}
-                  searchHistory={[results.metadata.primarySearchTerm, ...results.metadata.discoveredEntityList.slice(0, 5)]}
-                  discoveredEntities={results.metadata.discoveredEntityList}
-                />
-              </TabsContent>
-
-              {/* Insights Tab */}
-              <TabsContent value="insights" className="space-y-3">
-                {/* Entity Connections Table */}
-                <Card>
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-sm flex items-center gap-2">
-                      <Users className="h-4 w-4" />
-                      Entity Connections
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="space-y-1">
-                      {results.insights.entityConnections.slice(0, 15).map((conn, i) => (
-                        <div key={i} className="flex items-center justify-between p-2 hover:bg-muted/50 rounded text-sm">
-                          <div className="flex items-center gap-2">
-                            <Badge variant="outline" className="text-[10px]">{conn.type}</Badge>
-                            <span className="font-medium">{conn.entity}</span>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs text-muted-foreground">
-                              {conn.tables.join(', ').slice(0, 30)}
-                            </span>
-                            <Badge variant="secondary">{conn.appearances}</Badge>
-                          </div>
-                        </div>
-                      ))}
                     </div>
-                  </CardContent>
-                </Card>
+                    <div className="w-full h-full">
+                      {results.correlationGraph && (
+                        <CorrelationGraphView graph={results.correlationGraph} />
+                      )}
+                    </div>
+                  </DialogContent>
+                </Dialog>
 
-                {/* Patterns */}
-                {results.insights.patterns.length > 0 && (
-                  <Card>
-                    <CardHeader className="pb-2">
-                      <CardTitle className="text-sm">Detected Patterns</CardTitle>
-                    </CardHeader>
-                    <CardContent>
-                      <ul className="space-y-1 text-sm">
-                        {results.insights.patterns.map((pattern, i) => (
-                          <li key={i} className="flex items-start gap-2">
-                            <CheckCircle2 className="h-4 w-4 text-green-500 mt-0.5 shrink-0" />
-                            <span>{pattern}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </CardContent>
-                  </Card>
-                )}
+                <Button onClick={handleExportCSV} disabled={isSearching}>
+                  <Download className="mr-2 h-4 w-4" />
+                  Export CSV
+                </Button>
+                
+                <Button 
+                  variant="default" 
+                  onClick={handleExportPDF} 
+                  disabled={isSearching || isGeneratingPdf || !results?.filteredResults?.length}
+                  className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700"
+                >
+                  {isGeneratingPdf ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <FileText className="mr-2 h-4 w-4" />
+                  )}
+                  {isGeneratingPdf ? 'Generating...' : 'Export PDF Report'}
+                </Button>
+              </div>
+            </div>
 
-                {/* Recommendations */}
-                {results.insights.recommendations.length > 0 && (
-                  <Card>
-                    <CardHeader className="pb-2">
-                      <CardTitle className="text-sm">Recommendations</CardTitle>
-                    </CardHeader>
-                    <CardContent>
-                      <ul className="space-y-1 text-sm">
-                        {results.insights.recommendations.map((rec, i) => (
-                          <li key={i} className="flex items-start gap-2">
-                            <Zap className="h-4 w-4 text-yellow-500 mt-0.5 shrink-0" />
-                            <span>{rec}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </CardContent>
-                  </Card>
-                )}
-
-                {/* Top Matches */}
+            <div className="mt-4">
+              <TabsContent value="results" className="m-0">
                 <Card>
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-sm">Top Matches</CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-2">
-                    {results.insights.topMatches.slice(0, 5).map((result) => (
-                      <div key={result.id} className="p-2 bg-muted/50 rounded text-sm">
-                        <div className="flex items-center gap-2 mb-1">
-                          <Badge variant="outline" className="text-[10px]">{result.table}</Badge>
-                          <Badge className="text-[10px] bg-green-500">
-                            {Math.round(result.matchScore * 100)}% match
-                          </Badge>
-                        </div>
-                        <div className="text-xs text-muted-foreground truncate">
-                          {Object.entries(result.record).slice(0, 3).map(([k, v]) => 
-                            `${k}: ${String(v).slice(0, 20)}`
-                          ).join(' • ')}
-                        </div>
+                  <CardContent className="p-0">
+                    <ScrollArea className="h-[calc(100vh-500px)]">
+                      <div className="p-4 space-y-2">
+                        {results.filteredResults.map((result, i) => (
+                          <div
+                            key={`${result.table}-${i}`}
+                            className="border rounded-lg overflow-hidden"
+                          >
+                            <div
+                              className="flex items-center justify-between p-3 bg-muted/50 cursor-pointer hover:bg-muted"
+                              onClick={() => toggleRecord(`${result.table}-${i}`)}
+                            >
+                              <div className="flex items-center gap-2">
+                                {expandedRecords.has(`${result.table}-${i}`) ? (
+                                  <ChevronUp className="h-4 w-4" />
+                                ) : (
+                                  <ChevronDown className="h-4 w-4" />
+                                )}
+                                <span className="font-medium">{result.table}</span>
+                                <Badge variant="outline" className="text-xs">
+                                  Score: {(result.score * 100).toFixed(0)}%
+                                </Badge>
+                              </div>
+                              <div className="flex gap-1">
+                                {result.matchedFields.slice(0, 3).map((f, j) => (
+                                  <Badge key={j} variant="secondary" className="text-xs">
+                                    {f}
+                                  </Badge>
+                                ))}
+                              </div>
+                            </div>
+                            {expandedRecords.has(`${result.table}-${i}`) && (
+                              <div className="p-3 bg-background border-t">
+                                <pre className="text-xs overflow-x-auto">
+                                  {JSON.stringify(result.record, null, 2)}
+                                </pre>
+                              </div>
+                            )}
+                          </div>
+                        ))}
                       </div>
-                    ))}
+                    </ScrollArea>
                   </CardContent>
                 </Card>
               </TabsContent>
-            </Tabs>
-          </div>
-        )}
-      </ScrollArea>
-    </div>
-  );
-}
 
-// Result Card Component
-function ResultCard({ 
-  result, 
-  isExpanded, 
-  onToggle, 
-}: { 
-  result: FilteredResult; 
-  isExpanded: boolean; 
-  onToggle: () => void;
-}) {
-  return (
-    <div className="border rounded-lg p-3 hover:bg-muted/30 transition-colors">
-      <div className="flex items-center justify-between cursor-pointer" onClick={onToggle}>
-        <div className="flex items-center gap-2">
-          <Badge variant="outline" className="text-xs">{result.table}</Badge>
-          <span className="text-sm font-medium truncate max-w-[200px]">
-            {Object.values(result.record).slice(0, 2).filter(v => v).join(' • ') || 'View Details'}
-          </span>
-        </div>
-        <div className="flex items-center gap-2">
-          <Badge variant="secondary" className="text-xs">
-            {Math.round(result.matchScore * 100)}%
-          </Badge>
-          {isExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-        </div>
-      </div>
-
-      {isExpanded && (
-        <div className="mt-2 pt-2 border-t text-xs space-y-1">
-          {Object.entries(result.record).slice(0, 10).map(([key, value]) => (
-            <div key={key} className="flex justify-between">
-              <span className="text-muted-foreground">{key}:</span>
-              <span className={`truncate max-w-[250px] text-right ${key in result.highlights ? 'font-semibold text-primary' : ''}`}>
-                {value !== null && value !== undefined ? String(value).slice(0, 80) : '-'}
-              </span>
+              <TabsContent value="insights" className="m-0">
+                {results.insights && <InsightsPanel insights={results.insights} />}
+              </TabsContent>
             </div>
-          ))}
-          {result.matchedFilters.length > 0 && (
-            <div className="pt-2 flex flex-wrap gap-1">
-              {result.matchedFilters.map((f, i) => (
-                <Badge key={i} variant="secondary" className="text-[10px]">{f}</Badge>
-              ))}
+          </Tabs>
+
+          {/* Metadata */}
+          {results.metadata && (
+            <div className="flex items-center justify-between text-sm text-muted-foreground border-t pt-3">
+              <div className="flex gap-4">
+                <span>Search time: {results.metadata.searchTime}ms</span>
+                <span>API calls: {results.metadata.apiCalls}</span>
+                <span>Total fetched: {results.metadata.totalFetched}</span>
+                <span>Iterations: {results.metadata.iterationsPerformed}</span>
+              </div>
+              {results.metadata.v2Enabled && (
+                <Badge variant="outline" className="text-xs">
+                  <Sparkles className="h-3 w-3 mr-1" />
+                  V2 Engine Enabled
+                </Badge>
+              )}
             </div>
           )}
         </div>
       )}
+
+      {/* No Results Message */}
+      {results && results.filteredResults && results.filteredResults.length === 0 && (
+        <Card>
+          <CardContent className="py-8 text-center">
+            <p className="text-muted-foreground">No results found for your query.</p>
+            <p className="text-sm text-muted-foreground mt-2">
+              Try different search terms or check if your backend API is running at {baseUrl}
+            </p>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }
-
-export default RobustSearchView;

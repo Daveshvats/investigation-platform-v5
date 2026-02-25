@@ -4,7 +4,8 @@ import { HealthCard } from './health-card';
 import { CDCCard } from './cdc-card';
 import { StatsCard } from './stats-card';
 import { RecentJobsCard } from './recent-jobs-card';
-import { TableStatsChart, SearchableFieldsPieChart } from './charts';
+import { UserActivityCard } from './user-activity-card';
+import { SavedSearchesCard } from './saved-searches-card';
 import { Button } from '@/components/ui/button';
 import { useAppStore } from '@/store/settings';
 import { Table2, Search, GitBranch, Settings, Zap, Shield, BarChart3 } from 'lucide-react';
@@ -30,10 +31,10 @@ export function DashboardView() {
         <StatsCard />
       </div>
 
-      {/* Charts Row */}
+      {/* User Activity & Saved Searches Row */}
       <div className="grid gap-4 lg:grid-cols-2">
-        <TableStatsChart />
-        <SearchableFieldsPieChart />
+        <UserActivityCard />
+        <SavedSearchesCard />
       </div>
 
       {/* Recent Jobs & Quick Actions */}

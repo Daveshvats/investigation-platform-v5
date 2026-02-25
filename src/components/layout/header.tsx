@@ -87,6 +87,12 @@ export function Header() {
         return 'Tables Browser';
       case 'search':
         return 'Search';
+      case 'ai-search':
+        return 'AI Agent Search';
+      case 'robust-search':
+        return 'Robust Agent Search';
+      case 'investigation':
+        return 'Investigation';
       case 'pipeline':
         return 'Pipeline Jobs';
       case 'settings':

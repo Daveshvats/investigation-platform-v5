@@ -9,7 +9,6 @@ import {
   CheckCircle2,
   AlertTriangle,
   XCircle,
-  RefreshCw,
 } from 'lucide-react';
 
 export function HealthCard() {
@@ -24,22 +23,25 @@ export function HealthCard() {
         description: 'Unable to connect to the API server',
       };
     }
-    switch (health.status) {
-      case 'healthy':
+    // Backend returns "UP" or "DOWN"
+    const status = health.status?.toUpperCase();
+    switch (status) {
+      case 'UP':
+      case 'HEALTHY':
         return {
           icon: <CheckCircle2 className="h-8 w-8 text-green-500" />,
-          label: 'Healthy',
+          label: 'UP',
           color: 'default',
           description: 'All systems operational',
         };
-      case 'degraded':
+      case 'DEGRADED':
         return {
           icon: <AlertTriangle className="h-8 w-8 text-yellow-500" />,
           label: 'Degraded',
           color: 'secondary',
           description: 'Some features may be slow or unavailable',
         };
-      case 'down':
+      case 'DOWN':
         return {
           icon: <XCircle className="h-8 w-8 text-destructive" />,
           label: 'Down',
@@ -86,17 +88,27 @@ export function HealthCard() {
               <p className="text-xs text-muted-foreground">
                 {statusData.description}
               </p>
-              {health?.timestamp && (
+              {health?.tables_count !== undefined && (
                 <p className="text-xs text-muted-foreground">
-                  Last checked: {new Date(health.timestamp).toLocaleString()}
+                  {health.tables_count} tables available
+                </p>
+              )}
+              {health?.clickhouse !== undefined && (
+                <p className="text-xs text-muted-foreground">
+                  ClickHouse: {health.clickhouse ? '✓ Connected' : '✗ Disconnected'}
+                </p>
+              )}
+              {health?.redis !== undefined && (
+                <p className="text-xs text-muted-foreground">
+                  Redis: {health.redis ? '✓ Connected' : '✗ Disconnected'}
                 </p>
               )}
             </div>
           </div>
         )}
       </CardContent>
-      {/* Animated pulse for healthy status */}
-      {health?.status === 'healthy' && (
+      {/* Animated pulse for UP status */}
+      {(health?.status?.toUpperCase() === 'UP' || health?.status?.toLowerCase() === 'healthy') && (
         <div className="absolute right-4 top-4">
           <span className="relative flex h-3 w-3">
             <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-75"></span>

@@ -5,19 +5,72 @@ import type {
   TableMetadata,
   Schema,
   RecordsResponse,
-  GlobalSearchResponse,
-  CDCStatus,
-  PipelineJob,
   TableStats,
+  LoginRequest,
+  LoginResponse,
+  UserInfo,
 } from '@/types/api';
+
+// Backend response for global search
+interface GlobalSearchResponse {
+  results: Record<string, Record<string, unknown>[]>;
+  total_results: number;
+  has_more: boolean;
+  next_cursor: string | null;
+  search_time: number;
+  query: string;
+  limit: number;
+  search_engine: string;
+}
+
+// CDC Status
+interface CDCStatus {
+  is_running: boolean;
+  available: boolean;
+  total_tables: number;
+  table_statuses: Record<string, {
+    last_sync: string | null;
+    records_synced: number;
+    status: string;
+  }>;
+}
+
+// Pipeline Job
+interface PipelineJob {
+  job_id: string;
+  table_name?: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  progress: number;
+  total: number;
+  processed: number;
+  failed: number;
+  error?: string | null;
+  created_at?: string;
+  completed_at?: string | null;
+}
 
 class APIClient {
   private client: AxiosInstance | null = null;
+  private cachedAuthKey: string = '__INIT__'; // Force first-time recreation
+
+  // Force reset the client (call when settings change)
+  resetClient(): void {
+    this.client = null;
+    this.cachedAuthKey = '__INIT__';
+  }
 
   getClient(): AxiosInstance {
-    const { baseUrl, bearerToken, allowSelfSigned } = useSettingsStore.getState();
+    const { baseUrl, authType, authToken, bearerToken, allowSelfSigned } = useSettingsStore.getState();
 
-    if (!this.client || this.client.defaults.baseURL !== baseUrl) {
+    // Use authToken if available, otherwise fall back to bearerToken for backward compatibility
+    const token = authToken || bearerToken || '';
+    
+    // Create a key to track when we need to recreate the client
+    const authKey = `${baseUrl}:${authType}:${token ? 'has-token' : 'no-token'}:${allowSelfSigned}`;
+
+    // Recreate client if settings changed
+    if (!this.client || this.cachedAuthKey !== authKey) {
+      // Create fresh axios instance
       this.client = axios.create({
         baseURL: baseUrl,
         timeout: 30000,
@@ -25,14 +78,25 @@ class APIClient {
           'Content-Type': 'application/json',
         },
       });
+      
+      this.cachedAuthKey = authKey;
 
-      if (bearerToken) {
-        this.client.defaults.headers.common['Authorization'] = `Bearer ${bearerToken}`;
+      // Only add auth headers if there's an actual non-empty token
+      const hasValidToken = token && typeof token === 'string' && token.trim().length > 0;
+      
+      if (hasValidToken) {
+        const trimmedToken = token.trim();
+        if (authType === 'api-key') {
+          // Use X-API-Key header for API key authentication
+          this.client.defaults.headers.common['X-API-Key'] = trimmedToken;
+        } else {
+          // Use Authorization: Bearer header for JWT authentication
+          this.client.defaults.headers.common['Authorization'] = `Bearer ${trimmedToken}`;
+        }
       }
+      // No token = no auth headers at all (clean requests)
 
       if (allowSelfSigned) {
-        // Note: This would need to be handled server-side in a real app
-        // For client-side, we'll just log a warning
         console.warn('Self-signed certificates: This setting should be handled server-side');
       }
     }
@@ -40,13 +104,13 @@ class APIClient {
     return this.client;
   }
 
-  // Health & System
+  // Health & System - No auth required
   async healthCheck(): Promise<AxiosResponse<HealthStatus>> {
     return this.getClient().get('/api/health');
   }
 
   // Tables & Schema
-  async getTables(): Promise<AxiosResponse<{ tables: TableMetadata[] }>> {
+  async getTables(): Promise<AxiosResponse<{ tables: TableMetadata[]; count: number }>> {
     return this.getClient().get('/api/tables');
   }
 
@@ -58,8 +122,14 @@ class APIClient {
     return this.getClient().get(`/api/tables/${table}/stats`);
   }
 
-  // Records
-  async getRecords(table: string, params?: Record<string, unknown>): Promise<AxiosResponse<RecordsResponse>> {
+  // Records - Backend returns "data" array, not "records"
+  async getRecords(table: string, params?: { 
+    limit?: number; 
+    cursor?: string; 
+    sort_by?: string; 
+    sort_dir?: 'asc' | 'desc';
+    [key: string]: unknown;
+  }): Promise<AxiosResponse<RecordsResponse>> {
     return this.getClient().get(`/api/tables/${table}/records`, { params });
   }
 
@@ -67,25 +137,46 @@ class APIClient {
     return this.getClient().get(`/api/tables/${table}/records/${pk}`);
   }
 
-  // Search
-  async searchTable(table: string, params: { q: string; limit?: number; cursor?: string }): Promise<AxiosResponse<RecordsResponse>> {
+  // Search - Single table search
+  async searchTable(table: string, params: { 
+    q: string; 
+    limit?: number; 
+    cursor?: string;
+    columns?: string;
+    engine?: 'clickhouse' | 'postgresql';
+  }): Promise<AxiosResponse<RecordsResponse>> {
     return this.getClient().get(`/api/tables/${table}/search`, { params });
   }
 
-  async globalSearch(params: { q: string; limit?: number; cursor?: string; tables?: string[] }): Promise<AxiosResponse<GlobalSearchResponse>> {
-    return this.getClient().get('/api/search', { params });
+  // Global Search - Note: Backend uses /api/search/ with trailing slash
+  async globalSearch(params: { 
+    q: string; 
+    limit?: number; 
+    cursor?: string; 
+    tables?: string[] 
+  }): Promise<AxiosResponse<GlobalSearchResponse>> {
+    return this.getClient().get('/api/search/', { params });
   }
 
-  // CDC (Change Data Capture)
+  // CDC Status
   async getCDCStatus(): Promise<AxiosResponse<CDCStatus>> {
     return this.getClient().get('/api/cdc/status');
   }
 
   // Pipeline API Endpoints
-  async startPipelineJob(folderPath: string, recursive: boolean = false): Promise<AxiosResponse<{ job_id: string; message: string }>> {
+  async startPipelineJob(folderPath: string, tableName?: string, options?: {
+    delimiter?: string;
+    has_header?: boolean;
+    batch_size?: number;
+  }): Promise<AxiosResponse<{ job_id: string; status: string; message: string }>> {
     return this.getClient().post('/api/pipeline/start', {
-      folder_path: folderPath,
-      recursive: recursive,
+      file_path: folderPath,
+      table_name: tableName,
+      options: options || {
+        delimiter: ',',
+        has_header: true,
+        batch_size: 10000,
+      },
     });
   }
 
@@ -93,14 +184,12 @@ class APIClient {
     return this.getClient().get(`/api/pipeline/jobs/${jobId}`);
   }
 
-  async getAllPipelineJobs(): Promise<AxiosResponse<{ count: number; jobs: Record<string, PipelineJob> }>> {
+  async getAllPipelineJobs(): Promise<AxiosResponse<{ jobs: PipelineJob[] }>> {
     return this.getClient().get('/api/pipeline/jobs');
   }
 
-  async getPipelineJobLogs(jobId: string): Promise<AxiosResponse<string>> {
-    return this.getClient().get(`/api/pipeline/jobs/${jobId}/logs`, {
-      responseType: 'text',
-    });
+  async getPipelineJobLogs(jobId: string): Promise<AxiosResponse<{ logs: Array<{ time: string; level: string; message: string }> }>> {
+    return this.getClient().get(`/api/pipeline/jobs/${jobId}/logs`);
   }
 
   getPipelineJobStreamURL(jobId: string): string {
@@ -113,10 +202,29 @@ class APIClient {
     return new EventSource(streamURL);
   }
 
-  // Cancel pipeline job (if supported by backend)
   async cancelPipelineJob(jobId: string): Promise<AxiosResponse<{ message: string }>> {
     return this.getClient().post(`/api/pipeline/jobs/${jobId}/cancel`);
+  }
+
+  // Authentication API Endpoints
+  async login(data: LoginRequest): Promise<AxiosResponse<LoginResponse>> {
+    return this.getClient().post('/api/auth/login', data);
+  }
+
+  async register(data: LoginRequest & { name?: string }): Promise<AxiosResponse<LoginResponse>> {
+    return this.getClient().post('/api/auth/register', data);
+  }
+
+  async logout(): Promise<AxiosResponse<{ message: string }>> {
+    return this.getClient().post('/api/auth/logout');
+  }
+
+  async getCurrentUser(): Promise<AxiosResponse<UserInfo>> {
+    return this.getClient().get('/api/auth/me');
   }
 }
 
 export const apiClient = new APIClient();
+
+// Re-export types
+export type { GlobalSearchResponse, CDCStatus, PipelineJob };

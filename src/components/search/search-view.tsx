@@ -152,24 +152,8 @@ export function SearchView() {
       )}
 
       {/* Search Results */}
-      <SearchResults 
-        data={searchResults} 
-        isLoading={isLoading}
-        currentQuery={searchQuery}
-        currentTable={searchTable}
-      />
-
-      {/* Empty State */}
-      {!searchQuery && !searchResults && (
-        <div className="flex items-center justify-center min-h-[400px] border rounded-lg bg-muted/10">
-          <div className="text-center">
-            <div className="text-6xl mb-4">🔍</div>
-            <h3 className="text-lg font-medium">Start Your Search</h3>
-            <p className="text-sm text-muted-foreground mt-1">
-              Enter a search query to find data across your tables
-            </p>
-          </div>
-        </div>
+      {searchResults && (
+        <SearchResults results={searchResults} query={searchQuery} />
       )}
     </div>
   );

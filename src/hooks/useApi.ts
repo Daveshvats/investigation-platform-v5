@@ -1,6 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from '@/lib/api-client';
-import type { PipelineJob } from '@/types/api';
+import { useSettingsStore } from '@/store/settings';
+import type { PipelineJob, LoginRequest, LoginResponse, UserInfo } from '@/types/api';
 
 // Query Keys
 export const queryKeys = {
@@ -14,6 +15,7 @@ export const queryKeys = {
   pipelineJobs: ['pipelineJobs'] as const,
   pipelineJob: (jobId: string) => ['pipelineJob', jobId] as const,
   pipelineLogs: (jobId: string) => ['pipelineLogs', jobId] as const,
+  currentUser: ['currentUser'] as const,
 };
 
 // Health Check
@@ -201,9 +203,86 @@ export function useCancelPipelineJob() {
       const response = await apiClient.cancelPipelineJob(jobId);
       return response.data;
     },
-    onSuccess: (_, jobId) => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.pipelineJob(jobId) });
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.pipelineJobs });
+    },
+  });
+}
+
+// Get Current User
+export function useCurrentUser() {
+  const { authToken, authType } = useSettingsStore();
+  
+  return useQuery({
+    queryKey: queryKeys.currentUser,
+    queryFn: async () => {
+      const response = await apiClient.getCurrentUser();
+      return response.data;
+    },
+    enabled: !!authToken && authType === 'bearer',
+    retry: 1,
+  });
+}
+
+// Login Mutation
+export function useLogin() {
+  const { setAuthType, setAuthToken, setUser } = useSettingsStore();
+  const queryClient = useQueryClient();
+  
+  return useMutation({
+    mutationFn: async (data: LoginRequest) => {
+      const response = await apiClient.login(data);
+      return response.data;
+    },
+    onSuccess: (data: LoginResponse) => {
+      // Set auth type to bearer and store token
+      setAuthType('bearer');
+      setAuthToken(data.accessToken);
+      setUser(data.user);
+      // Invalidate queries to refetch with new auth
+      queryClient.invalidateQueries();
+    },
+  });
+}
+
+// Register Mutation
+export function useRegister() {
+  const { setAuthType, setAuthToken, setUser } = useSettingsStore();
+  const queryClient = useQueryClient();
+  
+  return useMutation({
+    mutationFn: async (data: LoginRequest & { name?: string }) => {
+      const response = await apiClient.register(data);
+      return response.data;
+    },
+    onSuccess: (data: LoginResponse) => {
+      // Set auth type to bearer and store token
+      setAuthType('bearer');
+      setAuthToken(data.accessToken);
+      setUser(data.user);
+      // Invalidate queries to refetch with new auth
+      queryClient.invalidateQueries();
+    },
+  });
+}
+
+// Logout Mutation
+export function useLogout() {
+  const { logout } = useSettingsStore();
+  const queryClient = useQueryClient();
+  
+  return useMutation({
+    mutationFn: async () => {
+      try {
+        await apiClient.logout();
+      } catch {
+        // Ignore logout API errors, still clear local state
+      }
+    },
+    onSuccess: () => {
+      logout();
+      // Clear all cached queries
+      queryClient.clear();
     },
   });
 }

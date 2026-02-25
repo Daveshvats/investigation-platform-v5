@@ -1,10 +1,12 @@
 'use client';
 
-import { useAppStore } from '@/store/settings';
+import { useAppStore, useSettingsStore } from '@/store/settings';
+import { useLogout } from '@/hooks/useApi';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
+import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import {
   LayoutDashboard,
   Table2,
@@ -15,8 +17,9 @@ import {
   ChevronRight,
   Database,
   Network,
-  Bot,
-  Brain,
+  LogIn,
+  LogOut,
+  Loader2,
 } from 'lucide-react';
 import type { ViewType } from '@/types/api';
 
@@ -27,17 +30,36 @@ const mainNavItems: { id: ViewType; label: string; icon: React.ElementType }[] =
 
 const searchNavItems: { id: ViewType; label: string; icon: React.ElementType; description: string }[] = [
   { id: 'search', label: 'Quick Search', icon: Search, description: 'Simple database search' },
-  { id: 'ai-search', label: 'AI Agent Search', icon: Bot, description: 'Smart search with ranking' },
-  { id: 'robust-search', label: 'Robust Agent Search', icon: Network, description: 'Full pagination + correlation' },
+  { id: 'robust-search', label: 'Deep Search', icon: Network, description: 'Full pagination + correlation' },
 ];
 
 const analysisNavItems: { id: ViewType; label: string; icon: React.ElementType }[] = [
-  { id: 'investigation', label: 'Investigation', icon: Brain },
   { id: 'pipeline', label: 'Pipeline Jobs', icon: GitBranch },
 ];
 
 export function Sidebar() {
   const { currentView, setCurrentView, sidebarOpen, toggleSidebar } = useAppStore();
+  const { user, authType, authToken } = useSettingsStore();
+  const logoutMutation = useLogout();
+
+  const isLoggedIn = authType === 'bearer' && authToken && user;
+
+  const getInitials = (name: string) => {
+    return name
+      .split(' ')
+      .map((n) => n[0])
+      .join('')
+      .toUpperCase()
+      .slice(0, 2);
+  };
+
+  const handleLogout = async () => {
+    try {
+      await logoutMutation.mutateAsync();
+    } catch {
+      // Error handled in mutation
+    }
+  };
 
   return (
     <div
@@ -108,10 +130,7 @@ export function Sidebar() {
                 )}
                 onClick={() => setCurrentView(item.id)}
               >
-                <Icon className={cn(
-                  'h-4 w-4',
-                  item.id === 'ai-search' && 'text-purple-500'
-                )} />
+                <Icon className="h-4 w-4" />
                 {sidebarOpen && (
                   <div className="flex flex-col items-start">
                     <span className="text-sm">{item.label}</span>
@@ -153,10 +172,7 @@ export function Sidebar() {
                 )}
                 onClick={() => setCurrentView(item.id)}
               >
-                <Icon className={cn(
-                  'h-4 w-4',
-                  item.id === 'investigation' && 'text-blue-500'
-                )} />
+                <Icon className="h-4 w-4" />
                 {sidebarOpen && <span className="text-sm">{item.label}</span>}
               </Button>
             );
@@ -164,8 +180,51 @@ export function Sidebar() {
         </div>
       </ScrollArea>
 
-      {/* Settings Button */}
-      <div className="border-t p-2">
+      {/* User Section / Login */}
+      <div className="border-t p-2 space-y-1">
+        {isLoggedIn && user ? (
+          <div className="flex items-center gap-2 p-2">
+            <Avatar className="h-8 w-8">
+              <AvatarFallback className="text-xs">
+                {getInitials(user.name || user.username || 'U')}
+              </AvatarFallback>
+            </Avatar>
+            {sidebarOpen && (
+              <>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium truncate">{user.name || user.username}</div>
+                  <div className="text-xs text-muted-foreground truncate">{user.email}</div>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8"
+                  onClick={handleLogout}
+                  disabled={logoutMutation.isPending}
+                >
+                  {logoutMutation.isPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <LogOut className="h-4 w-4" />
+                  )}
+                </Button>
+              </>
+            )}
+          </div>
+        ) : (
+          <Button
+            variant="ghost"
+            className={cn(
+              'w-full justify-start gap-3',
+              !sidebarOpen && 'justify-center px-2'
+            )}
+            onClick={() => setCurrentView('settings')}
+          >
+            <LogIn className="h-4 w-4" />
+            {sidebarOpen && <span className="text-sm">Sign In</span>}
+          </Button>
+        )}
+        
         <Button
           variant="ghost"
           className={cn(

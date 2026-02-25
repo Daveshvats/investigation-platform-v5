@@ -153,53 +153,27 @@ export function SearchableFieldsPieChart({ limit = 6 }: SearchableFieldsPieChart
               data={chartData}
               cx="50%"
               cy="50%"
-              innerRadius={50}
+              innerRadius={60}
               outerRadius={80}
-              paddingAngle={2}
+              paddingAngle={5}
               dataKey="value"
               label={({ name, value }) => `${name}: ${value}`}
               labelLine={false}
             >
-              {chartData.map((_, index) => (
+              {chartData.map((entry, index) => (
                 <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
               ))}
             </Pie>
             <Tooltip
+              formatter={(value: number) => [value, 'Fields']}
               contentStyle={{
                 backgroundColor: '#fff',
                 border: '1px solid #E0E0E0',
                 borderRadius: '8px',
               }}
-              formatter={(value: number) => [`${value} fields`, 'Searchable']}
             />
             <Legend />
           </PieChart>
-        </ResponsiveContainer>
-      </CardContent>
-    </Card>
-  );
-}
-
-interface SimpleBarChartProps {
-  data: Array<{ name: string; value: number }>;
-  title: string;
-}
-
-export function SimpleBarChart({ data, title }: SimpleBarChartProps) {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-sm font-medium">{title}</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <ResponsiveContainer width="100%" height={200}>
-          <BarChart data={data} layout="vertical" margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
-            <CartesianGrid strokeDasharray="3 3" />
-            <XAxis type="number" tick={{ fontSize: 10 }} />
-            <YAxis dataKey="name" type="category" width={80} tick={{ fontSize: 10 }} />
-            <Tooltip />
-            <Bar dataKey="value" fill="#1F4E79" radius={[0, 4, 4, 0]} />
-          </BarChart>
         </ResponsiveContainer>
       </CardContent>
     </Card>
