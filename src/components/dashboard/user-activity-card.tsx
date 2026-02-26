@@ -27,7 +27,7 @@ interface ActivityItem {
 const STORAGE_KEY = 'user-activity-log';
 
 // Module-level cache to avoid recreating arrays
-let cachedActivities: ActivityItem[] | null = null;
+let cachedActivities: ActivityItem[] = [];
 let cachedJsonString: string | null = null;
 
 // Get activity from localStorage with caching
@@ -38,13 +38,15 @@ const getStoredActivities = (): ActivityItem[] => {
     const stored = localStorage.getItem(STORAGE_KEY);
     
     // Return cached result if JSON string hasn't changed
-    if (stored === cachedJsonString && cachedActivities) {
+    if (stored === cachedJsonString) {
       return cachedActivities;
     }
     
     // Parse and cache new result
     cachedJsonString = stored;
-    cachedActivities = stored ? JSON.parse(stored) : [];
+    const parsed = stored ? JSON.parse(stored) : [];
+    // Ensure we always return an array (handle edge case where JSON returns null)
+    cachedActivities = Array.isArray(parsed) ? parsed : [];
     return cachedActivities;
   } catch {
     cachedJsonString = null;
