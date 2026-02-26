@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useSyncExternalStore } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -36,6 +36,22 @@ const getStoredActivities = (): ActivityItem[] => {
   } catch {
     return [];
   }
+};
+
+// Subscribe to localStorage changes
+const subscribeToActivities = (callback: () => void) => {
+  const handleStorageChange = (e: StorageEvent) => {
+    if (e.key === STORAGE_KEY) callback();
+  };
+  const handleActivityUpdate = () => callback();
+  
+  window.addEventListener('storage', handleStorageChange);
+  window.addEventListener('activity-updated', handleActivityUpdate);
+  
+  return () => {
+    window.removeEventListener('storage', handleStorageChange);
+    window.removeEventListener('activity-updated', handleActivityUpdate);
+  };
 };
 
 // Save activity to localStorage - exported for use in other components
@@ -91,27 +107,13 @@ const formatTimestamp = (timestamp: string) => {
 export function UserActivityCard() {
   const { user } = useSettingsStore();
   const { setCurrentView } = useAppStore();
-  // Use lazy initialization to avoid calling setState in effect
-  const [activities, setActivities] = useState<ActivityItem[]>(() => getStoredActivities());
-
-  // Listen for activity updates
-  useEffect(() => {
-    const handleActivityUpdate = () => {
-      setActivities(getStoredActivities());
-    };
-
-    window.addEventListener('activity-updated', handleActivityUpdate);
-    
-    // Also poll every 2 seconds as fallback
-    const interval = setInterval(() => {
-      setActivities(getStoredActivities());
-    }, 2000);
-
-    return () => {
-      window.removeEventListener('activity-updated', handleActivityUpdate);
-      clearInterval(interval);
-    };
-  }, []);
+  
+  // Use useSyncExternalStore to avoid hydration mismatch
+  const activities = useSyncExternalStore(
+    subscribeToActivities,
+    getStoredActivities,
+    () => [] // Server snapshot (empty array)
+  );
 
   // Calculate stats
   const today = new Date();

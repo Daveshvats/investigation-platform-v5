@@ -10,7 +10,7 @@ export function StatsCard() {
 
   const tables = tablesData?.tables || [];
   const totalColumns = tables.reduce((sum, t) => sum + t.columns, 0);
-  const searchableTables = tables.filter((t) => t.searchable.length > 0).length;
+  const searchableTables = tables.filter((t) => t.searchable?.length > 0).length;
 
   return (
     <Card>

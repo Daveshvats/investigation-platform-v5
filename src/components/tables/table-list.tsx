@@ -51,7 +51,7 @@ export function TableList() {
             <div className="flex-1 text-left min-w-0">
               <div className="flex items-center gap-2">
                 <span className="truncate font-medium">{table.name}</span>
-                {table.searchable.length > 0 && (
+                {table.searchable?.length > 0 && (
                   <Badge variant="outline" className="text-xs flex-shrink-0">
                     <Search className="h-3 w-3 mr-1" />
                     {table.searchable.length}
