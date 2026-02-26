@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useSyncExternalStore } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -15,7 +15,6 @@ import {
   ArrowRight,
   LogIn
 } from 'lucide-react';
-import type { ViewType } from '@/types/api';
 
 interface ActivityItem {
   id: string;
@@ -27,31 +26,31 @@ interface ActivityItem {
 
 const STORAGE_KEY = 'user-activity-log';
 
-// Get activity from localStorage
+// Module-level cache to avoid recreating arrays
+let cachedActivities: ActivityItem[] | null = null;
+let cachedJsonString: string | null = null;
+
+// Get activity from localStorage with caching
 const getStoredActivities = (): ActivityItem[] => {
   if (typeof window === 'undefined') return [];
+  
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
-    return stored ? JSON.parse(stored) : [];
+    
+    // Return cached result if JSON string hasn't changed
+    if (stored === cachedJsonString && cachedActivities) {
+      return cachedActivities;
+    }
+    
+    // Parse and cache new result
+    cachedJsonString = stored;
+    cachedActivities = stored ? JSON.parse(stored) : [];
+    return cachedActivities;
   } catch {
-    return [];
+    cachedJsonString = null;
+    cachedActivities = [];
+    return cachedActivities;
   }
-};
-
-// Subscribe to localStorage changes
-const subscribeToActivities = (callback: () => void) => {
-  const handleStorageChange = (e: StorageEvent) => {
-    if (e.key === STORAGE_KEY) callback();
-  };
-  const handleActivityUpdate = () => callback();
-  
-  window.addEventListener('storage', handleStorageChange);
-  window.addEventListener('activity-updated', handleActivityUpdate);
-  
-  return () => {
-    window.removeEventListener('storage', handleStorageChange);
-    window.removeEventListener('activity-updated', handleActivityUpdate);
-  };
 };
 
 // Save activity to localStorage - exported for use in other components
@@ -66,7 +65,11 @@ export function addActivity(activity: { type: 'search' | 'table' | 'export' | 'l
     };
     // Keep only last 50 activities
     const updated = [newActivity, ...stored].slice(0, 50);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+    
+    // Update cache directly
+    cachedActivities = updated;
+    cachedJsonString = JSON.stringify(updated);
+    localStorage.setItem(STORAGE_KEY, cachedJsonString);
     
     // Dispatch custom event to notify other components
     window.dispatchEvent(new CustomEvent('activity-updated'));
@@ -107,13 +110,25 @@ const formatTimestamp = (timestamp: string) => {
 export function UserActivityCard() {
   const { user } = useSettingsStore();
   const { setCurrentView } = useAppStore();
-  
-  // Use useSyncExternalStore to avoid hydration mismatch
-  const activities = useSyncExternalStore(
-    subscribeToActivities,
-    getStoredActivities,
-    () => [] // Server snapshot (empty array)
-  );
+  const [activities, setActivities] = useState<ActivityItem[]>([]);
+  const mountedRef = useRef(false);
+
+  // Subscribe to activity updates
+  useEffect(() => {
+    const handleActivityUpdate = () => {
+      setActivities(getStoredActivities());
+    };
+
+    // Load initial data on mount
+    handleActivityUpdate();
+    mountedRef.current = true;
+
+    window.addEventListener('activity-updated', handleActivityUpdate);
+    
+    return () => {
+      window.removeEventListener('activity-updated', handleActivityUpdate);
+    };
+  }, []);
 
   // Calculate stats
   const today = new Date();
