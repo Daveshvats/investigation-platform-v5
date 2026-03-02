@@ -93,18 +93,30 @@ export interface CDCStatus {
   }>;
 }
 
-// Pipeline job status
+// Pipeline job status - matches backend JobProgress struct
 export interface PipelineJob {
   job_id: string;
-  table_name?: string;
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
-  progress: number;
-  total: number;
-  processed: number;
-  failed: number;
-  error?: string | null;
-  created_at?: string;
+  folder_path: string;
+  total_files: number;
+  processed_files: number;
+  successful_files: number;
+  failed_files: number;
+  total_rows: number;
+  files?: Record<string, {
+    file_path: string;
+    table_name?: string;
+    sheet_name?: string;
+    status: 'pending' | 'processing' | 'completed' | 'failed';
+    rows_inserted: number;
+    error?: string;
+    started_at: string;
+    completed_at?: string;
+  }>;
+  started_at: string;
   completed_at?: string | null;
+  error?: string | null;
+  log_path?: string;
 }
 
 // Pipeline log entry
