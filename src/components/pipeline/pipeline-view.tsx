@@ -55,7 +55,7 @@ export function PipelineView() {
 
   const jobs: PipelineJob[] = data?.jobs
     ? Object.values(data.jobs).sort(
-        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+        (a, b) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime()
       )
     : [];
 
@@ -199,13 +199,13 @@ export function PipelineView() {
                         </Badge>
                       </div>
                       <div className="flex items-center gap-4 text-sm text-muted-foreground">
-                        {job.progress !== undefined && (
+                        {job.total_files > 0 && (
                           <div className="flex items-center gap-2">
-                            <Progress value={job.progress} className="w-24 h-2" />
-                            <span>{job.progress}%</span>
+                            <Progress value={job.processed_files > 0 ? Math.round((job.processed_files / job.total_files) * 100) : 0} className="w-24 h-2" />
+                            <span>{job.processed_files}/{job.total_files} files</span>
                           </div>
                         )}
-                        <span>{new Date(job.created_at).toLocaleString()}</span>
+                        <span>{new Date(job.started_at).toLocaleString()}</span>
                       </div>
                     </div>
 
@@ -217,18 +217,18 @@ export function PipelineView() {
                             <span className="ml-2 font-mono">{job.folder_path}</span>
                           </div>
                           <div>
-                            <span className="text-muted-foreground">Recursive:</span>
-                            <span className="ml-2">{job.recursive ? 'Yes' : 'No'}</span>
+                            <span className="text-muted-foreground">Total Rows:</span>
+                            <span className="ml-2">{job.total_rows.toLocaleString()}</span>
                           </div>
-                          {job.total_files !== undefined && (
+                          {job.total_files > 0 && (
                             <div>
                               <span className="text-muted-foreground">Files:</span>
                               <span className="ml-2">
-                                {job.processed_files || 0} / {job.total_files}
+                                {job.processed_files} / {job.total_files}
                               </span>
                             </div>
                           )}
-                          {job.failed_files !== undefined && job.failed_files > 0 && (
+                          {job.failed_files > 0 && (
                             <div>
                               <span className="text-muted-foreground">Failed:</span>
                               <span className="ml-2 text-red-500">{job.failed_files}</span>
@@ -237,7 +237,7 @@ export function PipelineView() {
                         </div>
 
                         {job.error && (
-                          <div className="text-sm text-red-500 bg-red-50 p-2 rounded">
+                          <div className="text-sm text-red-500 bg-red-50 dark:bg-red-950 p-2 rounded">
                             Error: {job.error}
                           </div>
                         )}
