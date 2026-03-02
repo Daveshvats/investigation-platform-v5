@@ -164,19 +164,11 @@ class APIClient {
   }
 
   // Pipeline API Endpoints
-  async startPipelineJob(folderPath: string, tableName?: string, options?: {
-    delimiter?: string;
-    has_header?: boolean;
-    batch_size?: number;
-  }): Promise<AxiosResponse<{ job_id: string; status: string; message: string }>> {
+  async startPipelineJob(folderPath: string, recursive?: boolean): Promise<AxiosResponse<{ job_id: string; status: string; message: string }>> {
+    // Backend expects: { "folder_path": "...", "recursive": true/false }
     return this.getClient().post('/api/pipeline/start', {
-      file_path: folderPath,
-      table_name: tableName,
-      options: options || {
-        delimiter: ',',
-        has_header: true,
-        batch_size: 10000,
-      },
+      folder_path: folderPath,
+      recursive: recursive || false,
     });
   }
 
